@@ -11,9 +11,13 @@ device.json
 # Runtime state and generated data
 cache/
 data/
+config/
+db/
+music/
 
 # LLOneBot local runtime bundle and data
 llonebot/
+linshi/
 
 # OS / editor noise
 .DS_Store

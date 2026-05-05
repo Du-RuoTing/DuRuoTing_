@@ -8,7 +8,6 @@ dependencies = [
     "nonebot2[fastapi]<3.0.0,>=2.4.3",
     "nonebot-adapter-onebot<3.0.0,>=2.4.6",
     "nonebot-plugin-apscheduler<1.0.0,>=0.5.0",
-    "nonebot-plugin-analysis-bilibili>=2.8.1",
     "nonebot-plugin-send-anything-anywhere>=0.7.1",
     "nonebot_plugin_withdraw>=0.4.1",
     "nonebot-plugin-whateat-pic>=1.5.7",
@@ -16,6 +15,10 @@ dependencies = [
     "httpx<1.0,>=0.27",
     "nonebot-plugin-wordsnorote>=0.0.2",
     "nonebot-plugin-reboot>=0.1.4",
+    "nonebot-plugin-ncm>=1.6.18",
+    "nonebot-plugin-parser>=2.6.3",
+    "nonebot-plugin-alconna>=0.62.0",
+    "nonebot-plugin-uninfo>=0.11.0",
 ]
 
 [tool.nonebot]
@@ -24,13 +27,16 @@ builtin_plugins = []
 
 [tool.nonebot.plugins]
 "@local" = []
-nonebot-plugin-analysis-bilibili = ["nonebot_plugin_analysis_bilibili"]
 nonebot-plugin-send-anything-anywhere = ["nonebot_plugin_saa"]
 nonebot_plugin_withdraw = ["nonebot_plugin_withdraw"]
 nonebot-plugin-whateat-pic = ["nonebot_plugin_whateat_pic"]
 nonebot-plugin-today-waifu = ["nonebot_plugin_today_waifu"]
 nonebot-plugin-wordsnorote = ["nonebot_plugin_wordsnorote"]
 nonebot-plugin-reboot = ["nonebot_plugin_reboot"]
+nonebot-plugin-ncm = ["nonebot-plugin-ncm"]
+nonebot-plugin-parser = ["nonebot_plugin_parser"]
+nonebot-plugin-alconna = ["nonebot_plugin_alconna"]
+nonebot-plugin-uninfo = ["nonebot_plugin_uninfo"]
 
 [tool.nonebot.adapters]
 "@local" = []

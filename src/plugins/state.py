@@ -16,6 +16,7 @@ DEFAULT_FEATURES = {
     "欢迎": True,
     "roll": True,
     "闲聊": True,
+    "头衔": True,
 }
 
 _lock = Lock()

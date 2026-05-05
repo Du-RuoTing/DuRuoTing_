@@ -11,12 +11,13 @@ init()
 driver = nonebot.get_driver()
 driver.register_adapter(Adapter)
 load_plugins("src/plugins")
-load_plugin("nonebot_plugin_analysis_bilibili")
 load_plugin("nonebot_plugin_withdraw")
 load_plugin("nonebot_plugin_whateat_pic")
 load_plugin("nonebot_plugin_today_waifu")
 load_plugin("nonebot_plugin_wordsnorote")
 load_plugin("nonebot_plugin_reboot")
+load_plugin("nonebot_plugin_parser")
+
 
 # 提供给 ASGI 服务器使用的应用对象。
 app = get_asgi()

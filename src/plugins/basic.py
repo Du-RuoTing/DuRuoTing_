@@ -18,7 +18,7 @@ WELCOME = "欢迎"
 FEATURE = "功能"
 FEATURE_ON = "开启功能"
 FEATURE_OFF = "关闭功能"
-UNKNOWN_FEATURE = "未知功能，只能操作：帮助、签到、欢迎、roll、闲聊"
+UNKNOWN_FEATURE = "未知功能，只能操作：帮助、签到、欢迎、roll、闲聊、头衔"
 
 admin_permission = GROUP_ADMIN | GROUP_OWNER | SUPERUSER
 
@@ -44,13 +44,14 @@ async def handle_help(event: GroupMessageEvent) -> None:
         "2. ping",
         "3. 签到",
         "4. 掷骰子！roll <min> <max>",
-        "5. 开启功能 <帮助|签到|欢迎|roll|闲聊>",
-        "6. 关闭功能 <帮助|签到|欢迎|roll|闲聊>",
+        "5. 开启功能 <帮助|签到|欢迎|roll|闲聊|头衔>",
+        "6. 关闭功能 <帮助|签到|欢迎|roll|闲聊|头衔>",
         "7. 早安 / 晚安 / 睡眠统计",
         "8. （xx）吃什么 / （xx）今天喝什么 / 添加菜单 / 查看菜单",
         "9. 杜若汀会聊天喔，@我开启闲聊",
-        "10. 今日单词",
-        "11. favor",
+        "10. 设置头衔 <内容> / 清除头衔",
+        "11. 今日单词",
+        "12. favor",
         "当前群功能状态：",
     ]
     lines.extend(f"- {name}: {'开启' if enabled else '关闭'}" for name, enabled in features.items())
