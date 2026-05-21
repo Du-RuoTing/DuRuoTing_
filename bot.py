@@ -17,6 +17,9 @@ load_plugin("nonebot_plugin_today_waifu")
 load_plugin("nonebot_plugin_wordsnorote")
 load_plugin("nonebot_plugin_reboot")
 load_plugin("nonebot_plugin_parser")
+load_plugin("nonebot_plugin_duel")
+load_plugin("nonebot_plugin_steam_info")
+load_plugin("nonebot_plugin_maimaidx")
 
 
 # 提供给 ASGI 服务器使用的应用对象。

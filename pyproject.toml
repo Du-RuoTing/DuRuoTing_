@@ -19,6 +19,9 @@ dependencies = [
     "nonebot-plugin-parser>=2.6.3",
     "nonebot-plugin-alconna>=0.62.0",
     "nonebot-plugin-uninfo>=0.11.0",
+    "nonebot-plugin-duel>=0.1.2",
+    "nonebot-plugin-steam-info>=1.3.5",
+    "nonebot-plugin-maimaidx>=2.1.11",
 ]
 
 [tool.nonebot]
@@ -37,6 +40,9 @@ nonebot-plugin-ncm = ["nonebot-plugin-ncm"]
 nonebot-plugin-parser = ["nonebot_plugin_parser"]
 nonebot-plugin-alconna = ["nonebot_plugin_alconna"]
 nonebot-plugin-uninfo = ["nonebot_plugin_uninfo"]
+nonebot-plugin-duel = ["nonebot_plugin_duel"]
+nonebot-plugin-steam-info = ["nonebot_plugin_steam_info"]
+nonebot-plugin-maimaidx = ["nonebot_plugin_maimaidx"]
 
 [tool.nonebot.adapters]
 "@local" = []
