@@ -37,16 +37,16 @@ SUPERUSERS=["242003347"]  # 替换为你的超级用户 QQ 号列表
 ONEBOT_ACCESS_TOKEN=
 LOCALSTORE_USE_CWD=true
 
-# DeepSeek 人格闲聊配置
-DEEPSEEK_API_KEY= # 替换为你的 DeepSeek API Key
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-reasoner (or deepseek-chat)
-DU_RUO_TING_PERSONA_PATH=D:\nonebot\杜若汀.txt (or ...)
-DU_RUO_TING_REPLY_PROBABILITY=0.08 (日常回复的概率)
-DU_RUO_TING_DIRECT_REPLY_PROBABILITY=0.72 (提到“杜若汀”回复的概率)
-DU_RUO_TING_MIN_REPLY_INTERVAL_SECONDS=1000
-DU_RUO_TING_SUMMARY_INTERVAL_MINUTES=30
-DU_RUO_TING_RECENT_CONTEXT_MESSAGES=10
-DU_RUO_TING_MAX_REPLY_CHARS=90
+DUEL__NICKNAME=杜若汀
 
-```
+# 平台可用 deepseek 或 packy；回复和摘要分别控制。
+# 模型名和 API key 单独填写，避免平台选择、模型选择、密钥配置互相覆盖。
+DU_RUO_TING_REPLY_SERVICE=deepseek
+DU_RUO_TING_REPLY_MODEL=deepseek-v4-pro
+DU_RUO_TING_SUMMARY_SERVICE=deepseek
+DU_RUO_TING_SUMMARY_MODEL=deepseek-v4-flash
+PACKY_API_KEY=//
+DEEPSEEK_API_KEY=//
+DU_RUO_TING_REQUEST_TIMEOUT_SECONDS=90
+# Packy 常用模型：xxxx，需确认当前令牌分组可用。
+# DeepSeek 常用模型：deepseek-v4-pro / deepseek-v4-flash。
