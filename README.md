@@ -3,9 +3,14 @@
 用在QQ群聊的NoneBot2机器人。
 A starter NoneBot2 QQ group bot powered by LLOneBot.
 
+## 📜 许可证
+
+本项目采用双许可（Dual Licensing）结构：
+
+*   **源代码**（`.py`文件等）：本项目所有功能代码均在 **MIT 许可证**下发布。这意味着你可以自由地使用、修改和分发代码，包括用于商业目的。详情请见 [LICENSE](./LICENSE) 文件。
+*   **内容与数据**（`personality.txt`文件等）：项目中用于定义机器人人格的文本文件，属于独立创作的文字作品，采用 **CC BY-NC 4.0** 许可。你可以在非商业目的下自由分享和修改它，但必须保留原作者署名。
+  
 ## Built-in Features
-
-
 
 ## Before Running
 
