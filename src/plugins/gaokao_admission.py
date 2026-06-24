@@ -25,7 +25,9 @@ DATA_DIR = Path(
 DETAIL_CSV = DATA_DIR / "henan_major_admission_scores_2022_2025.csv"
 GROUP_CSV = DATA_DIR / "henan_major_group_admission_scores_2025.csv"
 SOURCE_TEXT = "数据来源：@Jorge de Burgos 如有错误请反馈 @桓衍"
-VERSION_TEXT = "版本号：0.2.0"
+VERSION_TEXT = "版本号：1.0.0"
+AUTHOR_TEXT = "制图：github@huanyan77777"
+MAX_RESULT_ROWS = 48
 SUBJECTS = {"物理", "历史", "文科", "理科", "艺术", "体育", "艺术类", "体育类"}
 
 gaokao_help = on_fullmatch({"gaokaohelp", "高考帮助"}, priority=8, block=True)
@@ -157,11 +159,11 @@ def _select_result_rows(
     detail_rows: list[dict[str, str]], group_rows: list[dict[str, str]], query: str
 ) -> tuple[list[dict[str, str]], str]:
     if _is_group_query(query) and group_rows:
-        return group_rows[:18], "专业组"
+        return group_rows, "专业组"
     if detail_rows:
-        return _latest_years(detail_rows)[:24], "专业"
+        return _latest_years(detail_rows), "专业"
     if group_rows:
-        return group_rows[:18], "专业组"
+        return group_rows, "专业组"
     return [], "专业"
 
 
@@ -323,12 +325,13 @@ def _build_result_image(
     header_font = _pick_font(29, bold=True)
     cell_font = _pick_font(29)
     remark_font = _pick_font(27)
+    notice_font = _pick_font(30, bold=True)
     small_font = _pick_font(26)
 
     width = 1080
     if result_type == "专业组":
         headers = ["年份", "科类", "批次", "专业组", "选科要求", "最低分", "最低位次"]
-        widths = [86, 86, 138, 105, 330, 105, 150]
+        widths = [86, 86, 170, 105, 300, 105, 148]
         entries = [
             (
                 [
@@ -346,7 +349,7 @@ def _build_result_image(
         ]
     else:
         headers = ["年份", "科类", "批次", "专业", "组", "最低分", "最低位次"]
-        widths = [86, 86, 138, 345, 78, 105, 162]
+        widths = [86, 86, 170, 315, 78, 105, 160]
         entries = [
             (
                 [
@@ -363,8 +366,9 @@ def _build_result_image(
             for row in rows
         ]
 
-    card_heights = [96 + max(1, len(_line_wrap(remark, 32)[:5])) * 39 for _, remark in entries]
-    height = 330 + 81 + (sum(card_heights) if card_heights else 108) + 170
+    card_heights = [82 + max(1, len(_line_wrap(remark, 32)[:5])) * 39 for _, remark in entries]
+    content_bottom = 300 + 81 + (sum(card_heights) if card_heights else 108)
+    height = content_bottom + 160
     image = Image.new("RGB", (width, height), "#eef5fb")
     draw = ImageDraw.Draw(image)
     draw.rounded_rectangle((24, 24, width - 24, height - 24), radius=28, fill="#f8fbff", outline="#bdd3e8", width=2)
@@ -372,10 +376,17 @@ def _build_result_image(
     subject_text = f" · {subject}" if subject else ""
     query_text = query or "全部"
     draw.text((48, 48), f"{school}{subject_text}录取查询", fill="#0f2742", font=title_font)
-    draw.text((50, 128), f"查询：{query_text} · 类型：{result_type} · 展示 {len(rows)}/{total_count} 条", fill="#375a7f", font=meta_font)
-    draw.text((50, 178), "说明：2023/2024 改革前文理科仅作趋势参考；2025 专业组由专业分聚合。", fill="#4b6f95", font=small_font)
+    limit_text = f" · 已截断前 {len(rows)} 条" if total_count > len(rows) else ""
+    draw.text(
+        (50, 128),
+        f"查询：{query_text} · 类型：{result_type} · 展示 {len(rows)}/{total_count} 条{limit_text}",
+        fill="#375a7f",
+        font=meta_font,
+    )
+    draw.text((50, 178), "仅供参考，不作为任何报考建议", fill="#0f2742", font=notice_font)
+    draw.text((50, 222), "由于 2025 年为新高考，其投档线要相对前几年略高，请注意甄别", fill="#0f2742", font=notice_font)
 
-    y = 250
+    y = 300
     y = _draw_table_row(draw, y, headers, widths, header_font, "#f8fbff", "#1f5f99", card_width=width)
     if entries:
         for index, (values, remark) in enumerate(entries):
@@ -384,8 +395,8 @@ def _build_result_image(
     else:
         draw.text((52, y + 10), "没有匹配到数据。请检查学校名、科类、专业名、备注或专业组代码。", fill="#375a7f", font=meta_font)
 
-    draw.text((48, height - 118), SOURCE_TEXT, fill="#375a7f", font=small_font)
-    draw.text((48, height - 78), VERSION_TEXT, fill="#375a7f", font=small_font)
+    draw.text((48, content_bottom + 44), SOURCE_TEXT, fill="#375a7f", font=small_font)
+    draw.text((48, content_bottom + 88), f"{AUTHOR_TEXT}    {VERSION_TEXT}", fill="#375a7f", font=small_font)
     buffer = BytesIO()
     image.save(buffer, format="PNG")
     return buffer.getvalue()
@@ -429,5 +440,12 @@ async def handle_gaokao_query(event: GroupMessageEvent) -> None:
     group_rows = _match_group_rows(store, school, query, subject)
     rows, result_type = _select_result_rows(detail_rows, group_rows, query)
     total_count = len(group_rows) if result_type == "专业组" else len(detail_rows)
-    image = _build_result_image(school, subject, query, rows, result_type, total_count)
+    image = _build_result_image(
+        school,
+        subject,
+        query,
+        rows[:MAX_RESULT_ROWS],
+        result_type,
+        total_count,
+    )
     await gaokao_query.finish(MessageSegment.image(image))
