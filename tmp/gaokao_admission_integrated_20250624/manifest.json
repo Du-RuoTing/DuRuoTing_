@@ -11,7 +11,7 @@
   "strategy": "Use merged 2025 group table as group source; inject 2025 group summaries into detail table so school-only queries show both 2025 group lines and historical major admission rows.",
   "source_plan_xlsx": "tmp\\河南\\河南2025\\河南-2025-招生计划.xlsx",
   "major_list_enrichment": {
-    "strategy": "Aggregate 2025 enrollment plan majors by school_name, subject_track, batch and major_group_code, then write the joined list into major_list for group rows and 2025 detail rows.",
+    "strategy": "Aggregate 2025 enrollment plan major names by school_name, subject_track, batch and major_group_code. If the plan note contains '包含专业', append only that included-major segment to the major name. Do not include elective requirements, plan counts, campuses or policy notes.",
     "plan_groups": 9773,
     "group_rows_with_major_list": 7229,
     "group_rows_total": 7424,
