@@ -8,8 +8,6 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from threading import Lock
-from typing import Any
-
 from nonebot import on_fullmatch, on_regex
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment
 from PIL import Image, ImageDraw, ImageFont
@@ -24,7 +22,7 @@ DATA_DIR = Path(
 DETAIL_CSV = DATA_DIR / "henan_major_admission_scores_2022_2025.csv"
 GROUP_CSV = DATA_DIR / "henan_major_group_admission_scores_2025.csv"
 SOURCE_TEXT = "数据来源：@Jorge de Burgos 如有错误请反馈 @桓衍"
-VERSION_TEXT = "版本号：1.0.4"
+VERSION_TEXT = "版本号：1.0.5"
 AUTHOR_TEXT = "制图：github@huanyan77777"
 MAX_RESULT_ROWS = 48
 SUBJECTS = {"物理", "历史", "文科", "理科", "艺术", "体育", "艺术类", "体育类"}
@@ -231,6 +229,70 @@ def _wrap_cell(value: str, width: int, max_lines: int = 2) -> list[str]:
     return _line_wrap(value, max(4, width // 28))[:max_lines]
 
 
+def _highlight_terms(query: str) -> list[str]:
+    query = query.strip()
+    if not query:
+        return []
+    if _is_group_query(query):
+        digits = re.sub(r"\D", "", query)
+        return [digits] if digits else []
+    return [query]
+
+
+def _find_highlight(text: str, terms: list[str]) -> tuple[int, str] | None:
+    matches = [(index, term) for term in terms if term and (index := text.find(term)) >= 0]
+    if not matches:
+        return None
+    return min(matches, key=lambda item: item[0])
+
+
+def _text_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> int:
+    if not text:
+        return 0
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return bbox[2] - bbox[0]
+
+
+def _text_height(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> int:
+    bbox = draw.textbbox((0, 0), text or "国", font=font)
+    return bbox[3] - bbox[1]
+
+
+def _draw_highlighted_text(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    text: str,
+    fill: str,
+    font: ImageFont.ImageFont,
+    bold_font: ImageFont.ImageFont,
+    terms: list[str],
+) -> None:
+    highlight = _find_highlight(text, terms)
+    if not highlight:
+        draw.text(xy, text, fill=fill, font=font)
+        return
+
+    x, y = xy
+    cursor = x
+    remaining = text
+    while remaining:
+        match = _find_highlight(remaining, terms)
+        if not match:
+            draw.text((cursor, y), remaining, fill=fill, font=font)
+            break
+        index, term = match
+        prefix = remaining[:index]
+        if prefix:
+            draw.text((cursor, y), prefix, fill=fill, font=font)
+            cursor += _text_width(draw, prefix, font)
+        draw.text((cursor, y), term, fill=fill, font=bold_font)
+        term_width = _text_width(draw, term, bold_font)
+        underline_y = y + _text_height(draw, term, bold_font) + 9
+        draw.line((cursor, underline_y, cursor + term_width, underline_y), fill=fill, width=2)
+        cursor += term_width
+        remaining = remaining[index + len(term) :]
+
+
 def _draw_table_row(
     draw: ImageDraw.ImageDraw,
     y: int,
@@ -265,7 +327,13 @@ def _draw_record_card(
     bg: str,
     card_width: int,
     max_remark_lines: int = 12,
+    highlight_terms: list[str] | None = None,
+    cell_bold_font: ImageFont.ImageFont | None = None,
+    remark_bold_font: ImageFont.ImageFont | None = None,
 ) -> int:
+    highlight_terms = highlight_terms or []
+    cell_bold_font = cell_bold_font or cell_font
+    remark_bold_font = remark_bold_font or remark_font
     remark_lines = _line_wrap(remark, 32) if remark else []
     if len(remark_lines) > max_remark_lines:
         remark_lines = remark_lines[:max_remark_lines]
@@ -276,95 +344,37 @@ def _draw_record_card(
     x = 42
     for value, width in zip(values, widths):
         lines = _wrap_cell(value, width)
-        draw.text((x, y), lines[0], fill="#071a33", font=cell_font)
+        _draw_highlighted_text(
+            draw, (x, y), lines[0], fill="#071a33", font=cell_font, bold_font=cell_bold_font, terms=highlight_terms
+        )
         if len(lines) > 1:
-            draw.text((x, y + 38), lines[1], fill="#071a33", font=cell_font)
+            _draw_highlighted_text(
+                draw,
+                (x, y + 38),
+                lines[1],
+                fill="#071a33",
+                font=cell_font,
+                bold_font=cell_bold_font,
+                terms=highlight_terms,
+            )
         x += width
 
     remark_y = y + 67
     draw.text((42, remark_y), "备注：", fill="#0a4f8a", font=remark_font)
     if remark_lines:
         for index, line in enumerate(remark_lines):
-            draw.text((122, remark_y + index * 39), line, fill="#0b2745", font=remark_font)
+            _draw_highlighted_text(
+                draw,
+                (122, remark_y + index * 39),
+                line,
+                fill="#0b2745",
+                font=remark_font,
+                bold_font=remark_bold_font,
+                terms=highlight_terms,
+            )
     else:
         draw.text((122, remark_y), "无", fill="#4d6680", font=remark_font)
     return y + row_h
-
-
-def _build_result_image(
-    school: str,
-    subject: str | None,
-    query: str,
-    rows: list[dict[str, str]],
-    result_type: str,
-    total_count: int,
-) -> bytes:
-    title_font = _pick_font(40, bold=True)
-    meta_font = _pick_font(21)
-    header_font = _pick_font(20, bold=True)
-    cell_font = _pick_font(19)
-    small_font = _pick_font(17)
-
-    width = 712
-    row_h = 54
-    estimated_row_heights: list[int] = []
-    image = Image.new("RGB", (width, height), "#f4efe7")
-    draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle((24, 24, width - 24, height - 24), radius=24, fill="#fffaf3", outline="#e3d3bd", width=2)
-
-    subject_text = f" · {subject}" if subject else ""
-    query_text = query or "全部"
-    draw.text((48, 48), f"{school}{subject_text}录取查询", fill="#2f281f", font=title_font)
-    draw.text((50, 102), f"查询：{query_text} · 类型：{result_type} · 展示 {len(rows)}/{total_count} 条", fill="#766858", font=meta_font)
-    draw.text((50, 134), "说明：2023/2024 改革前文理科仅作趋势参考；2025 专业组由专业分聚合。", fill="#9a6a43", font=small_font)
-
-    if result_type == "专业组":
-        headers = ["年份", "科类", "批次", "专业组", "选科要求", "最低分", "最低位次", "备注"]
-        widths = [70, 70, 120, 90, 220, 80, 110, 570]
-        body = [
-            [
-                row.get("year", ""),
-                row.get("subject_track", ""),
-                row.get("batch", ""),
-                row.get("major_group_code") or row.get("major_group_name", ""),
-                row.get("subject_requirement", ""),
-                row.get("min_score", ""),
-                row.get("min_rank", ""),
-                row.get("notes", ""),
-            ]
-            for row in rows
-        ]
-    else:
-        headers = ["年份", "科类", "批次", "专业", "专业组", "最低分", "最低位次", "选科/备注"]
-        widths = [70, 70, 120, 230, 80, 80, 110, 570]
-        body = [
-            [
-                row.get("year", ""),
-                row.get("subject_track", ""),
-                row.get("batch", ""),
-                row.get("major_name", ""),
-                row.get("major_group_code") or row.get("major_group_name", ""),
-                row.get("min_score", ""),
-                row.get("min_rank", ""),
-                "；".join(item for item in (row.get("subject_requirement"), row.get("major_note")) if item),
-            ]
-            for row in rows
-        ]
-
-    y = 184
-    y = _draw_table_row(draw, y, headers, widths, header_font, "#4a3829", "#efe2d0")
-    if body:
-        for index, values in enumerate(body):
-            bg = "#fff6ec" if index % 2 else "#fbf0e4"
-            y = _draw_table_row(draw, y, values, widths, cell_font, "#4c4036", bg)
-    else:
-        draw.text((52, y + 10), "没有匹配到数据。请检查学校名、科类、专业名或专业组代码。", fill="#7d5b45", font=meta_font)
-        y += row_h
-
-    draw.text((48, height - 66), f"{SOURCE_TEXT}    {VERSION_TEXT}", fill="#6d5b4b", font=small_font)
-    buffer = BytesIO()
-    image.save(buffer, format="PNG")
-    return buffer.getvalue()
 
 
 def _build_result_image(
@@ -379,9 +389,12 @@ def _build_result_image(
     meta_font = _pick_font(32)
     header_font = _pick_font(29, bold=True)
     cell_font = _pick_font(29)
+    cell_bold_font = _pick_font(29, bold=True)
     remark_font = _pick_font(27)
+    remark_bold_font = _pick_font(27, bold=True)
     notice_font = _pick_font(30, bold=True)
     small_font = _pick_font(26)
+    highlight_terms = _highlight_terms(query)
 
     width = 1080
     if result_type == "专业组":
@@ -462,6 +475,9 @@ def _build_result_image(
                 bg,
                 width,
                 max_remark_lines=max_remark_lines,
+                highlight_terms=highlight_terms,
+                cell_bold_font=cell_bold_font,
+                remark_bold_font=remark_bold_font,
             )
     else:
         draw.text((52, y + 10), "没有匹配到数据。请检查学校名、科类、专业名、备注或专业组代码。", fill="#375a7f", font=meta_font)
