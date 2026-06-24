@@ -32,10 +32,10 @@ DATA_ROOT = Path("data") / "duruoting"
 GROUP_DIR = DATA_ROOT / "groups"
 USER_DIR = DATA_ROOT / "users"
 BOT_LOG_DIR = DATA_ROOT / "bot_logs"
-PENDING_SUMMARY_MIN_MESSAGES = 6
+PENDING_SUMMARY_MIN_MESSAGES = 12
 MAX_PENDING_MESSAGES = 80
 DEFAULT_SUMMARY_MAX_MESSAGES = 24
-MAX_RECENT_USER_MESSAGES = 12
+MAX_RECENT_USER_MESSAGES = 24
 MAX_RECENT_BOT_MESSAGES = 24
 NAME_TRIGGERS = ("杜若汀", "小汀", "杜若")
 SKIP_PREFIXES = (
@@ -485,7 +485,7 @@ def _record_message(event: GroupMessageEvent, text: str) -> tuple[dict[str, Any]
         "user_name": user_name,
         "text": text,
         "time": now,
-        "mentioned_bot": bool(event.is_tome() or _collect_mentions(text)),
+        "mentioned_bot": bool(_is_at_bot(event) or _collect_mentions(text)),
     }
 
     with _io_lock:
@@ -529,11 +529,14 @@ def _should_summarize(group_state: dict[str, Any]) -> bool:
         return True
     return datetime.now() - last_summary_at >= timedelta(minutes=CONFIG.summary_interval_minutes)
 
-
-def _must_reply(event: GroupMessageEvent) -> bool:
-    # 只要用户显式 @ 机器人，就强制回复，不走概率分支。
-    return event.is_tome()
-
+def _is_at_bot(event: GroupMessageEvent) -> bool:
+    # OneBot V11 适配器会把开头/结尾的 @机器人 从 event.message 里移除，
+    # 并设置 event.to_me=True；因此必须检查 original_message 才能识别真实 @。
+    # 不直接使用 event.is_tome()，因为“回复 bot 消息”也会让 to_me=True。
+    message = getattr(event, "original_message", event.message)
+    return any(
+        segment.type == "at" and str(segment.data.get("qq", "")) == str(event.self_id) for segment in message
+    )
 
 def _reply_probability(event: GroupMessageEvent, text: str, group_state: dict[str, Any]) -> float:
     # 概率回复的目标不是“随机插话”，而是尽量低频但又别太像死掉：
@@ -541,7 +544,7 @@ def _reply_probability(event: GroupMessageEvent, text: str, group_state: dict[st
     # - 被叫名字时提高概率
     # - 近期堆积了很多未接住的话题时稍微更愿意开口
     # - 刚刚回复过时主动降频，控制 token 消耗
-    if _must_reply(event):
+    if _is_at_bot(event):
         return 1.0
 
     probability = CONFIG.reply_probability
@@ -821,6 +824,8 @@ async def _maybe_update_summary(group_id: int) -> None:
     # 2. 裁掉过长输入，只整理最近若干条，避免超时
     # 3. 调摘要模型拿到 JSON
     # 4. 把摘要写回群状态，并把 user_updates 合并进各用户画像
+    if not is_feature_enabled(group_id, PLUGIN_NAME):
+        return
     with _io_lock:
         group_state = _read_json(_group_path(group_id), _default_group_state(group_id))
         if not _should_summarize(group_state):
@@ -909,7 +914,7 @@ async def _generate_reply(
     except Exception as exc:
         logger.warning(
             f"reply_failed | group={event.group_id} | user={event.user_id} | text_len={len(text)} | "
-            f"is_tome={event.is_tome()} | provider={CONFIG.provider} | model={CONFIG.model} | "
+            f"is_tome={event.is_tome()} | at_bot={_is_at_bot(event)} | provider={CONFIG.provider} | model={CONFIG.model} | "
             f"base_url={CONFIG.base_url} | "
             f"timeout={CONFIG.request_timeout_seconds}s | error_type={type(exc).__name__} | error={exc!r}"
         )
@@ -940,6 +945,8 @@ async def _scheduled_summary_job() -> None:
         try:
             group_id = int(file.stem)
         except ValueError:
+            continue
+        if not is_feature_enabled(group_id, PLUGIN_NAME):
             continue
         await _maybe_update_summary(group_id)
 
@@ -993,7 +1000,15 @@ async def handle_group_chat(event: GroupMessageEvent, matcher: Matcher) -> None:
         return
 
     text = event.get_plaintext().strip()
-    force_reply = _must_reply(event)
+    force_reply = _is_at_bot(event)
+    logger.debug(
+        "duruoting_message_seen | group={} | user={} | is_tome={} | at_bot={} | text_len={}",
+        event.group_id,
+        event.user_id,
+        event.is_tome(),
+        force_reply,
+        len(text),
+    )
     if not text and not force_reply:
         return
     if text and _is_command_like(text) and not force_reply:
@@ -1006,7 +1021,16 @@ async def handle_group_chat(event: GroupMessageEvent, matcher: Matcher) -> None:
         asyncio.create_task(_maybe_update_summary(event.group_id))
 
     probability = _reply_probability(event, text, group_state)
-    if random.random() > probability:
+    draw = random.random()
+    if draw > probability:
+        logger.debug(
+            "duruoting_reply_skipped | group={} | user={} | probability={:.3f} | draw={:.3f} | at_bot={}",
+            event.group_id,
+            event.user_id,
+            probability,
+            draw,
+            force_reply,
+        )
         return
 
     reply = await _generate_reply(event, text, group_state, user_state)
