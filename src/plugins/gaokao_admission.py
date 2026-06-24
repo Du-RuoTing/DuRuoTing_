@@ -22,7 +22,7 @@ DATA_DIR = Path(
 DETAIL_CSV = DATA_DIR / "henan_major_admission_scores_2022_2025.csv"
 GROUP_CSV = DATA_DIR / "henan_major_group_admission_scores_2025.csv"
 SOURCE_TEXT = "数据来源：@Jorge de Burgos 如有错误请反馈 @桓衍"
-VERSION_TEXT = "版本号：1.0.5"
+VERSION_TEXT = "版本号：1.0.6"
 AUTHOR_TEXT = "制图：github@huanyan77777"
 MAX_RESULT_ROWS = 48
 SUBJECTS = {"物理", "历史", "文科", "理科", "艺术", "体育", "艺术类", "体育类"}
@@ -156,7 +156,6 @@ def _match_detail_rows(store: AdmissionStore, school: str, query: str, subject: 
                 or query in _compact_text(row.get("major_group_code", ""))
                 or query in _compact_text(row.get("major_group_name", ""))
                 or query in _compact_text(row.get("major_note", ""))
-                or query in _compact_text(row.get("major_list", ""))
                 or query in _compact_text(row.get("subject_requirement", ""))
             ]
     return sorted(rows, key=_admission_sort_key)
@@ -191,7 +190,37 @@ def _select_result_rows(
     if _is_group_query(query) and group_rows:
         return group_rows, "专业组"
     if detail_rows:
-        return _latest_years(detail_rows), "专业"
+        existing_group_summary_rows = [row for row in detail_rows if row.get("major_name") == "专业组投档线"]
+        additional_group_summary_rows: list[dict[str, str]] = []
+        if group_rows:
+            group_keys = {
+                (
+                    row.get("year", ""),
+                    row.get("school_name", ""),
+                    row.get("subject_track", ""),
+                    row.get("batch", ""),
+                    row.get("major_group_code", ""),
+                )
+                for row in existing_group_summary_rows
+            }
+            for row in group_rows:
+                key = (
+                    row.get("year", ""),
+                    row.get("school_name", ""),
+                    row.get("subject_track", ""),
+                    row.get("batch", ""),
+                    row.get("major_group_code", ""),
+                )
+                if key in group_keys:
+                    continue
+                additional_group_summary_rows.append(
+                    {
+                    **row,
+                    "major_name": "专业组投档线",
+                    "major_note": "2025 新高考专业组投档线汇总；用于学校总览查询。",
+                    }
+                )
+        return _latest_years([*detail_rows, *additional_group_summary_rows]), "专业"
     if group_rows:
         return group_rows, "专业组"
     return [], "专业"
@@ -430,7 +459,13 @@ def _build_result_image(
                     row.get("min_rank", ""),
                 ],
                 "；".join(
-                    item for item in (row.get("subject_requirement"), row.get("major_note"), row.get("major_list")) if item
+                    item
+                    for item in (
+                        row.get("subject_requirement"),
+                        row.get("major_note"),
+                        row.get("major_list") if row.get("major_name") == "专业组投档线" else "",
+                    )
+                    if item
                 ),
             )
             for row in rows
