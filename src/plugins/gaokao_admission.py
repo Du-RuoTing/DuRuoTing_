@@ -18,14 +18,13 @@ from PIL import Image, ImageDraw, ImageFont
 DATA_DIR = Path(
     os.getenv(
         "GAOKAO_ADMISSION_DATA_DIR",
-        "tmp/online_admission_scores_20260623_002850/"
-        "online_admission_scores_20260623_002850/data/processed/user_provided/admission_scores",
+        "tmp/gaokao_admission_integrated_20250624",
     )
 )
 DETAIL_CSV = DATA_DIR / "henan_major_admission_scores_2022_2025.csv"
 GROUP_CSV = DATA_DIR / "henan_major_group_admission_scores_2025.csv"
 SOURCE_TEXT = "数据来源：@Jorge de Burgos 如有错误请反馈 @桓衍"
-VERSION_TEXT = "版本号：1.0.0"
+VERSION_TEXT = "版本号：1.0.1"
 AUTHOR_TEXT = "制图：github@huanyan77777"
 MAX_RESULT_ROWS = 48
 SUBJECTS = {"物理", "历史", "文科", "理科", "艺术", "体育", "艺术类", "体育类"}
@@ -111,6 +110,37 @@ def _is_group_query(query: str) -> bool:
     return bool(re.fullmatch(r"(?:专业组)?\(?\d{2,3}\)?", query))
 
 
+def _year_sort_value(row: dict[str, str]) -> int:
+    try:
+        return int(row.get("year", "0") or 0)
+    except ValueError:
+        return 0
+
+
+def _major_group_sort_value(row: dict[str, str]) -> tuple[int, int | str]:
+    code = row.get("major_group_code") or row.get("major_group_name", "")
+    digits = re.sub(r"\D", "", code)
+    if digits:
+        return (0, int(digits))
+    return (1, code)
+
+
+def _subject_sort_value(row: dict[str, str]) -> tuple[int, str]:
+    subject = row.get("subject_track", "")
+    priority = {"物理": 0, "理科": 1, "历史": 2, "文科": 3}
+    return (priority.get(subject, 9), subject)
+
+
+def _admission_sort_key(row: dict[str, str]) -> tuple[tuple[int, str], tuple[int, int | str], int, str, str]:
+    return (
+        _subject_sort_value(row),
+        _major_group_sort_value(row),
+        -_year_sort_value(row),
+        row.get("major_name", ""),
+        row.get("major_code", ""),
+    )
+
+
 def _match_detail_rows(store: AdmissionStore, school: str, query: str, subject: str | None) -> list[dict[str, str]]:
     query = query.strip()
     rows = [row for row in store.detail_rows if row.get("school_name") == school]
@@ -130,7 +160,7 @@ def _match_detail_rows(store: AdmissionStore, school: str, query: str, subject: 
                 or query in _compact_text(row.get("major_note", ""))
                 or query in _compact_text(row.get("subject_requirement", ""))
             ]
-    return sorted(rows, key=lambda item: (item.get("major_name", ""), item.get("year", "")), reverse=True)
+    return sorted(rows, key=_admission_sort_key)
 
 
 def _match_group_rows(store: AdmissionStore, school: str, query: str, subject: str | None) -> list[dict[str, str]]:
@@ -147,7 +177,7 @@ def _match_group_rows(store: AdmissionStore, school: str, query: str, subject: s
             or code in _compact_text(row.get("subject_requirement", ""))
             or code in _compact_text(row.get("notes", ""))
         ]
-    return sorted(rows, key=lambda item: (item.get("subject_track", ""), item.get("major_group_code", "")))
+    return sorted(rows, key=_admission_sort_key)
 
 
 def _latest_years(rows: list[dict[str, str]], limit: int = 4) -> list[dict[str, str]]:

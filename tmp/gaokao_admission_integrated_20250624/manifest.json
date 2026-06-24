@@ -1,0 +1,12 @@
+{
+  "created_at": "2026-06-24T13:14:17",
+  "source_group_csv": "tmp\\online_admission_scores_20260623_002850\\online_admission_scores_20260623_002850\\data\\processed\\user_provided\\admission_scores\\henan_major_group_admission_scores_2025.csv",
+  "source_detail_csv": "tmp\\online_admission_scores_20260623_002850\\online_admission_scores_20260623_002850\\data\\processed\\user_provided\\admission_scores\\henan_major_admission_scores_2022_2025.csv",
+  "output_group_csv": "tmp\\gaokao_admission_integrated_20250624\\henan_major_group_admission_scores_2025.csv",
+  "output_detail_csv": "tmp\\gaokao_admission_integrated_20250624\\henan_major_admission_scores_2022_2025.csv",
+  "group_rows": 7424,
+  "detail_rows_before": 135505,
+  "group_summary_rows_added_to_detail": 7319,
+  "detail_rows_after": 142824,
+  "strategy": "Use merged 2025 group table as group source; inject 2025 group summaries into detail table so school-only queries show both 2025 group lines and historical major admission rows."
+}
