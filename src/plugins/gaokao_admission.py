@@ -131,12 +131,12 @@ def _subject_sort_value(row: dict[str, str]) -> tuple[int, str]:
     return (priority.get(subject, 9), subject)
 
 
-def _admission_sort_key(row: dict[str, str]) -> tuple[tuple[int, str], tuple[int, int | str], int, str, str]:
+def _admission_sort_key(row: dict[str, str]) -> tuple[tuple[int, int | str], str, tuple[int, str], int, str]:
     return (
-        _subject_sort_value(row),
         _major_group_sort_value(row),
-        -_year_sort_value(row),
         row.get("major_name", ""),
+        _subject_sort_value(row),
+        -_year_sort_value(row),
         row.get("major_code", ""),
     )
 
@@ -195,6 +195,25 @@ def _select_result_rows(
     if group_rows:
         return group_rows, "专业组"
     return [], "专业"
+
+
+def _subject_bucket(row: dict[str, str]) -> str:
+    subject = row.get("subject_track", "")
+    if subject in {"物理", "理科"}:
+        return "物理"
+    if subject in {"历史", "文科"}:
+        return "历史"
+    return subject
+
+
+def _split_physics_history(rows: list[dict[str, str]]) -> list[tuple[str, list[dict[str, str]]]]:
+    buckets = {
+        "物理": [row for row in rows if _subject_bucket(row) == "物理"],
+        "历史": [row for row in rows if _subject_bucket(row) == "历史"],
+    }
+    if buckets["物理"] and buckets["历史"]:
+        return [("物理", buckets["物理"]), ("历史", buckets["历史"])]
+    return []
 
 
 def _line_wrap(text: str, width: int) -> list[str]:
@@ -470,6 +489,22 @@ async def handle_gaokao_query(event: GroupMessageEvent) -> None:
     group_rows = _match_group_rows(store, school, query, subject)
     rows, result_type = _select_result_rows(detail_rows, group_rows, query)
     total_count = len(group_rows) if result_type == "专业组" else len(detail_rows)
+    split_rows = _split_physics_history(rows) if subject is None else []
+    if split_rows:
+        message = None
+        for split_subject, subject_rows in split_rows:
+            image = _build_result_image(
+                school,
+                split_subject,
+                query,
+                subject_rows[:MAX_RESULT_ROWS],
+                result_type,
+                len(subject_rows),
+            )
+            segment = MessageSegment.image(image)
+            message = segment if message is None else message + segment
+        await gaokao_query.finish(message)
+
     image = _build_result_image(
         school,
         subject,
