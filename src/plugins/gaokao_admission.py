@@ -24,7 +24,7 @@ DATA_DIR = Path(
 DETAIL_CSV = DATA_DIR / "henan_major_admission_scores_2022_2025.csv"
 GROUP_CSV = DATA_DIR / "henan_major_group_admission_scores_2025.csv"
 SOURCE_TEXT = "数据来源：@Jorge de Burgos 如有错误请反馈 @桓衍"
-VERSION_TEXT = "版本号：1.0.1"
+VERSION_TEXT = "版本号：1.0.2"
 AUTHOR_TEXT = "制图：github@huanyan77777"
 MAX_RESULT_ROWS = 48
 SUBJECTS = {"物理", "历史", "文科", "理科", "艺术", "体育", "艺术类", "体育类"}
@@ -262,8 +262,12 @@ def _draw_record_card(
     remark_font: ImageFont.ImageFont,
     bg: str,
     card_width: int,
+    max_remark_lines: int = 12,
 ) -> int:
-    remark_lines = _line_wrap(remark, 32)[:5] if remark else []
+    remark_lines = _line_wrap(remark, 32) if remark else []
+    if len(remark_lines) > max_remark_lines:
+        remark_lines = remark_lines[:max_remark_lines]
+        remark_lines[-1] = remark_lines[-1].rstrip("。；，, ") + "..."
     row_h = 82 + max(1, len(remark_lines)) * 39
     draw.rounded_rectangle((28, y - 8, card_width - 28, y + row_h - 10), radius=14, fill=bg)
 
@@ -392,7 +396,7 @@ def _build_result_image(
                     row.get("min_score", ""),
                     row.get("min_rank", ""),
                 ],
-                row.get("notes", ""),
+                "；".join(item for item in (row.get("notes"), row.get("major_list")) if item),
             )
             for row in rows
         ]
@@ -410,12 +414,17 @@ def _build_result_image(
                     row.get("min_score", ""),
                     row.get("min_rank", ""),
                 ],
-                "；".join(item for item in (row.get("subject_requirement"), row.get("major_note")) if item),
+                "；".join(
+                    item for item in (row.get("subject_requirement"), row.get("major_note"), row.get("major_list")) if item
+                ),
             )
             for row in rows
         ]
 
-    card_heights = [82 + max(1, len(_line_wrap(remark, 32)[:5])) * 39 for _, remark in entries]
+    max_remark_lines = 18 if result_type == "专业组" else 12
+    card_heights = [
+        82 + max(1, min(len(_line_wrap(remark, 32)), max_remark_lines)) * 39 for _, remark in entries
+    ]
     content_bottom = 300 + 81 + (sum(card_heights) if card_heights else 108)
     height = content_bottom + 160
     image = Image.new("RGB", (width, height), "#eef5fb")
@@ -440,7 +449,18 @@ def _build_result_image(
     if entries:
         for index, (values, remark) in enumerate(entries):
             bg = "#f6fbff" if index % 2 else "#edf6ff"
-            y = _draw_record_card(draw, y, values, widths, remark, cell_font, remark_font, bg, width)
+            y = _draw_record_card(
+                draw,
+                y,
+                values,
+                widths,
+                remark,
+                cell_font,
+                remark_font,
+                bg,
+                width,
+                max_remark_lines=max_remark_lines,
+            )
     else:
         draw.text((52, y + 10), "没有匹配到数据。请检查学校名、科类、专业名、备注或专业组代码。", fill="#375a7f", font=meta_font)
 
