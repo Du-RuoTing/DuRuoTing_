@@ -24,7 +24,7 @@ DATA_DIR = Path(
 DETAIL_CSV = DATA_DIR / "henan_major_admission_scores_2022_2025.csv"
 GROUP_CSV = DATA_DIR / "henan_major_group_admission_scores_2025.csv"
 SOURCE_TEXT = "数据来源：@Jorge de Burgos 如有错误请反馈 @桓衍"
-VERSION_TEXT = "版本号：1.0.2"
+VERSION_TEXT = "版本号：1.0.3"
 AUTHOR_TEXT = "制图：github@huanyan77777"
 MAX_RESULT_ROWS = 48
 SUBJECTS = {"物理", "历史", "文科", "理科", "艺术", "体育", "艺术类", "体育类"}
@@ -158,6 +158,7 @@ def _match_detail_rows(store: AdmissionStore, school: str, query: str, subject: 
                 or query in _compact_text(row.get("major_group_code", ""))
                 or query in _compact_text(row.get("major_group_name", ""))
                 or query in _compact_text(row.get("major_note", ""))
+                or query in _compact_text(row.get("major_list", ""))
                 or query in _compact_text(row.get("subject_requirement", ""))
             ]
     return sorted(rows, key=_admission_sort_key)
@@ -174,6 +175,7 @@ def _match_group_rows(store: AdmissionStore, school: str, query: str, subject: s
             for row in rows
             if code in _compact_text(row.get("major_group_code", ""))
             or code in _compact_text(row.get("major_group_name", ""))
+            or code in _compact_text(row.get("major_list", ""))
             or code in _compact_text(row.get("subject_requirement", ""))
             or code in _compact_text(row.get("notes", ""))
         ]
