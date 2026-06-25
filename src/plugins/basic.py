@@ -22,7 +22,7 @@ WELCOME = "欢迎"
 FEATURE = "功能"
 FEATURE_ON = "开启功能"
 FEATURE_OFF = "关闭功能"
-UNKNOWN_FEATURE = "未知功能，只能操作：帮助、签到、欢迎、roll、闲聊、头衔、favor、今天吃什么"
+UNKNOWN_FEATURE = "未知功能，只能操作：帮助、签到、欢迎、roll、闲聊、头衔、favor、今天吃什么、小汀报考"
 CHAT_FEATURE = "闲聊"
 FAVOR_FEATURE = "favor"
 WHATEAT_FEATURE = "今天吃什么"
@@ -104,6 +104,8 @@ def _build_help_image(group_id: int, features: dict[str, bool]) -> bytes:
         ("开启闲聊 [群号] / 关闭闲聊 [群号]", "superuser 选择哪些群开启闲聊"),
         ("早安 / 晚安 / 睡眠统计", "记录和查看睡眠"),
         ("吃什么 / 喝什么 / 添加菜单 / 查看菜单", "随机菜单相关功能"),
+        ("abbr bupt", "查询高校英文简称对应的中文校名"),
+        ("报考 物理 4874 新工科优先", "小汀报考：按位次生成报考参考"),
         ("@杜若汀", "在已开启闲聊的群里聊天"),
         ("设置头衔 <内容> / 清除头衔", "群头衔工具"),
         ("今日老婆 / favor / 今日单词", "群友抽取、好感和学习功能"),
