@@ -846,8 +846,7 @@ async def handle_apply(event: GroupMessageEvent) -> None:
     except FileNotFoundError as exc:
         await apply_cmd.finish(str(exc))
 
-    candidate_pool = _select_candidate_pool(store, subject, rank, preference, max(render_limit * 4, 80), location_filter)
-    candidates = await _ai_diverse_candidates(candidate_pool, subject, rank, preference, render_limit, region_label)
+    candidates = _select_candidates(store, subject, rank, preference, render_limit, location_filter)
     if not candidates:
         await apply_cmd.finish("没有在本地数据里筛到合适候选。可以换一个位次或补充专业/学校偏好再试。")
 
