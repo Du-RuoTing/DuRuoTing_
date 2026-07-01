@@ -37,7 +37,9 @@ MAX_PENDING_MESSAGES = 80
 DEFAULT_SUMMARY_MAX_MESSAGES = 24
 MAX_RECENT_USER_MESSAGES = 24
 MAX_RECENT_BOT_MESSAGES = 24
-NAME_TRIGGERS = ("杜若汀", "小汀", "杜若")
+DEFAULT_BOT_NAME = "杜若汀"
+DEFAULT_PERSONA_DIR = Path(r"D:\nonebot")
+DEFAULT_EXTRA_NAME_TRIGGERS = ("小汀", "杜若")
 SKIP_PREFIXES = (
     "/",
     ".",
@@ -89,6 +91,7 @@ class ChatConfig:
     summary_provider: str
     summary_api_key: str
     summary_base_url: str
+    bot_name: str
     persona_path: Path
     reply_probability: float
     direct_reply_probability: float
@@ -99,6 +102,7 @@ class ChatConfig:
     request_timeout_seconds: int
     summary_model: str
     summary_max_messages: int
+    name_triggers: tuple[str, ...]
 
 
 def _read_service_name(name: str, default: str) -> str:
@@ -161,6 +165,10 @@ def _load_config() -> ChatConfig:
     summary_base_url = summary_service["base_url"]
     model = _get_config_value("DU_RUO_TING_REPLY_MODEL", reply_service["default_reply_model"])
     summary_model = _get_config_value("DU_RUO_TING_SUMMARY_MODEL", summary_service["default_summary_model"])
+    bot_name = _get_config_value("DU_RUO_TING_BOT_NAME", DEFAULT_BOT_NAME) or DEFAULT_BOT_NAME
+    default_persona_path = DEFAULT_PERSONA_DIR / f"{bot_name}.txt"
+    extra_triggers_raw = _get_config_value("DU_RUO_TING_NAME_TRIGGERS", ",".join(DEFAULT_EXTRA_NAME_TRIGGERS))
+    extra_triggers = tuple(item.strip() for item in re.split(r"[,，]", extra_triggers_raw) if item.strip())
 
     return ChatConfig(
         provider=provider,
@@ -170,9 +178,10 @@ def _load_config() -> ChatConfig:
         summary_provider=summary_provider,
         summary_api_key=summary_api_key,
         summary_base_url=summary_base_url,
+        bot_name=bot_name,
         persona_path=Path(
-            _get_config_value("DU_RUO_TING_PERSONA_PATH", r"D:\nonebot\杜若汀.txt")
-            or r"D:\nonebot\杜若汀.txt"
+            _get_config_value("DU_RUO_TING_PERSONA_PATH", str(default_persona_path))
+            or str(default_persona_path)
         ),
         reply_probability=max(0.0, min(1.0, _read_config_float("DU_RUO_TING_REPLY_PROBABILITY", 0.08))),
         direct_reply_probability=max(
@@ -188,6 +197,7 @@ def _load_config() -> ChatConfig:
             8,
             _read_config_int("DU_RUO_TING_SUMMARY_MAX_MESSAGES", DEFAULT_SUMMARY_MAX_MESSAGES),
         ),
+        name_triggers=(bot_name, *extra_triggers),
     )
 
 
@@ -286,9 +296,13 @@ def _extract_name(event: GroupMessageEvent) -> str:
     return (sender.nickname or str(event.user_id)).strip()
 
 
+def _name_triggers() -> tuple[str, ...]:
+    return CONFIG.name_triggers
+
+
 def _collect_mentions(text: str) -> bool:
     lowered = text.lower()
-    return any(trigger.lower() in lowered for trigger in NAME_TRIGGERS)
+    return any(trigger.lower() in lowered for trigger in _name_triggers())
 
 
 def _is_command_like(text: str) -> bool:
@@ -365,7 +379,7 @@ def _record_bot_reply(
     record = {
         "role": "bot",
         "user_id": "bot",
-        "user_name": "杜若汀",
+        "user_name": CONFIG.bot_name,
         "text": text,
         "time": now,
         "message_id": sent_message_id,
@@ -714,7 +728,7 @@ def _build_reply_prompts(
     # 回复提示词分两部分：
     # - system_prompt 强约束人格、人设和回复风格
     # - user_prompt 动态注入当前发言、近期上下文、群摘要和发言人画像
-    # 这样既能保持“杜若汀”的稳定人格，又能记住当前群聊在聊什么。
+    # 这样既能保持 bot 的稳定人格，又能记住当前群聊在聊什么。
     recent_messages = group_state.get("recent_messages", [])[-CONFIG.recent_context_messages :]
     bot_messages = group_state.get("bot_messages", [])[-8:]
     pending_messages = group_state.get("pending_messages", [])[-6:]
@@ -724,7 +738,7 @@ def _build_reply_prompts(
         for item in recent_messages
     ]
     bot_lines = [
-        f"[{item['time']}] 杜若汀: {item['text']}"
+        f"[{item['time']}] {CONFIG.bot_name}: {item['text']}"
         for item in bot_messages
         if item.get("text")
     ]
@@ -744,7 +758,7 @@ def _build_reply_prompts(
         "important_facts": user_state.get("important_facts"),
     }
     system_prompt = (
-        "你要在QQ群里扮演杜若汀并保持人格绝对稳定。\n"
+        f"你要在QQ群里扮演{CONFIG.bot_name}并保持人格绝对稳定。\n"
         f"{PERSONA_TEXT}\n\n"
         "回复规则：\n"
         "1. 必须完全遵守上面的人格设定、口吻、关系设定和称呼习惯。\n"
