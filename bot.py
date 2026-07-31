@@ -20,6 +20,7 @@ load_plugin("nonebot_plugin_parser")
 load_plugin("nonebot_plugin_duel")
 load_plugin("nonebot_plugin_steam_info")
 load_plugin("nonebot_plugin_maimaidx")
+load_plugin("nonebot_plugin_pjsk_helper")
 
 
 # 提供给 ASGI 服务器使用的应用对象。
