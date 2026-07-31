@@ -26,12 +26,19 @@ UNKNOWN_FEATURE = "未知功能，只能操作：帮助、签到、欢迎、roll
 CHAT_FEATURE = "闲聊"
 FAVOR_FEATURE = "favor"
 WHATEAT_FEATURE = "今天吃什么"
+DEFAULT_BOT_NAME = "杜若汀"
+DEFAULT_TODAY_WAIFU_ALIASES = ("每日老婆", "我的老婆", "wife", "waifu", "老婆", "favor", "favour")
+DEFAULT_WELCOME_TEXT = (
+    "欢迎来到{bot_name}的茶馆喔！这里有的是沾着露水的鲜花、新沏的茶、美丽的故事和可爱的茶友\n"
+    "桓衍有时候不在家\n"
+    "有什么问题都可以和我说喔\n"
+    "我是{bot_name}！请多关照喔！"
+)
 
-WAIFU_COMMAND_RE = re.compile(
+FAVOR_COMMAND_RE = re.compile(r"^\s*[/.]?favor(?:\s+.*)?$", re.I)
+WAIFU_ADMIN_COMMAND_RE = re.compile(
     r"^\s*[/.]?(?:"
-    r"今日老婆(?:信息|帮助)?|"
     r"换老婆|"
-    r"(?:刷新|重置)今日老婆|"
     r"设置换老婆次数\s*\d+|"
     r"(?:开启|关闭)换老婆|"
     r"(?:开启|关闭)自动撤回|"
@@ -41,7 +48,6 @@ WAIFU_COMMAND_RE = re.compile(
     r"设置活跃天数\s*\d+"
     r")\s*$"
 )
-FAVOR_COMMAND_RE = re.compile(r"^\s*[/.]?favor(?:\s+.*)?$", re.I)
 WHATEAT_COMMAND_RE = re.compile(
     r"^\s*[/.]?(?:"
     r"(?:今|明|后)?(?:天|日)?(?:早|中|晚|上|下)?(?:上|午|餐|饭|夜宵|宵夜|早|晚)?(?:吃|喝)(?:什么|啥|点啥)|"
@@ -61,12 +67,57 @@ chat_off_cmd = on_regex(r"^关闭闲聊(?:\s+\d+)?$", permission=SUPERUSER, prio
 welcome_notice = on_notice(priority=20, block=False)
 
 
+def _get_config_value(name: str, default: str = "") -> str:
+    config = get_driver().config
+    value = getattr(config, name.lower(), None)
+    if value is None:
+        value = default
+    return str(value).strip()
+
+
+def _bot_name() -> str:
+    return _get_config_value("DU_RUO_TING_BOT_NAME", DEFAULT_BOT_NAME) or DEFAULT_BOT_NAME
+
+
+def _today_waifu_aliases() -> tuple[str, ...]:
+    raw = _get_config_value("TODAY_WAIFU_ALIASES", "")
+    aliases = [alias for alias in DEFAULT_TODAY_WAIFU_ALIASES]
+    aliases.append("今日老婆")
+    if raw:
+        aliases.extend(re.findall(r"[\w\u4e00-\u9fff-]+", raw))
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for alias in aliases:
+        alias = alias.strip()
+        key = alias.lower()
+        if alias and key not in seen:
+            seen.add(key)
+            result.append(alias)
+    return tuple(result)
+
+
+def _welcome_text() -> str:
+    template = _get_config_value("DU_RUO_TING_WELCOME_TEXT", DEFAULT_WELCOME_TEXT) or DEFAULT_WELCOME_TEXT
+    return template.replace("\\n", "\n").format(bot_name=_bot_name())
+
+
 def _is_superuser(event: GroupMessageEvent) -> bool:
     return str(event.user_id) in {str(user_id) for user_id in get_driver().config.superusers}
 
 
 def _blocked_feature_for_text(text: str) -> str | None:
-    if WAIFU_COMMAND_RE.match(text):
+    normalized = re.sub(r"^\s*[/.]?", "", text).strip()
+    normalized_lower = normalized.lower()
+    waifu_aliases = _today_waifu_aliases()
+    waifu_alias_lowers = {alias.lower() for alias in waifu_aliases}
+    if normalized_lower in waifu_alias_lowers:
+        return FAVOR_FEATURE
+    if any(normalized_lower == f"{alias.lower()}信息" or normalized_lower == f"{alias.lower()}帮助" for alias in waifu_aliases):
+        return FAVOR_FEATURE
+    if any(normalized_lower == f"刷新{alias.lower()}" or normalized_lower == f"重置{alias.lower()}" for alias in waifu_aliases):
+        return FAVOR_FEATURE
+    if WAIFU_ADMIN_COMMAND_RE.match(text):
         return FAVOR_FEATURE
     if FAVOR_COMMAND_RE.match(text):
         return FAVOR_FEATURE
@@ -106,7 +157,7 @@ def _build_help_image(group_id: int, features: dict[str, bool]) -> bytes:
         ("吃什么 / 喝什么 / 添加菜单 / 查看菜单", "随机菜单相关功能"),
         ("abbr bupt", "查询高校英文简称对应的中文校名"),
         ("报考 物理 4874 河南 新工科优先 [.num=48]", "小汀报考：按位次/地区生成报考参考"),
-        ("@杜若汀", "在已开启闲聊的群里聊天"),
+        (f"@{_bot_name()}", "在已开启闲聊的群里聊天"),
         ("设置头衔 <内容> / 清除头衔", "群头衔工具"),
         ("今日老婆 / favor / 今日单词", "群友抽取、好感和学习功能"),
     ]
@@ -127,7 +178,7 @@ def _build_help_image(group_id: int, features: dict[str, bool]) -> bytes:
     small_font = _pick_font(18)
 
     draw.rounded_rectangle((28, 28, width - 28, height - 28), radius=26, fill="#fffaf3", outline="#e6d7c2", width=2)
-    draw.text((58, 50), "杜若汀菜单", fill="#33281f", font=title_font)
+    draw.text((58, 50), f"{_bot_name()}菜单", fill="#33281f", font=title_font)
     draw.text((60, 104), f"群号 {group_id} · 功能状态随本群设置变化", fill="#7b6958", font=subtitle_font)
 
     y = header_h
@@ -275,10 +326,5 @@ async def handle_welcome(bot: Bot, event: NoticeEvent) -> None:
 
     await bot.send_group_msg(
         group_id=group_id,
-        message=(
-            "欢迎来到小汀的茶馆喔！这里有的是沾着露水的鲜花、新沏的茶、美丽的故事和可爱的茶友\n"
-            "桓衍有时候不在家\n"
-            "有什么问题都可以和我说喔\n"
-            "我是杜若汀！请多关照喔！"
-        ),
+        message=_welcome_text(),
     )
