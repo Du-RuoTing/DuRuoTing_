@@ -77,6 +77,12 @@ LLM_SERVICES: dict[str, dict[str, str]] = {
         "default_reply_model": "gpt-5.2",
         "default_summary_model": "gpt-5.2",
     },
+    "huanyan": {
+        "base_url": "https://api.huanyan.ltd/v1",
+        "api_key_name": "HUANYAN_API_KEY",
+        "default_reply_model": "gpt-5.5",
+        "default_summary_model": "gpt-5.5",
+    }
 }
 
 
@@ -93,6 +99,7 @@ class ChatConfig:
     summary_base_url: str
     bot_name: str
     persona_path: Path
+    group_persona_paths: dict[int, Path]
     reply_probability: float
     direct_reply_probability: float
     min_reply_interval_seconds: int
@@ -153,6 +160,36 @@ def _read_config_int(name: str, default: int) -> int:
         return default
 
 
+def _read_group_persona_paths() -> dict[int, Path]:
+    raw = _get_config_value("DU_RUO_TING_GROUP_PERSONA_PATHS", "").strip()
+    if not raw:
+        return {}
+
+    pairs: dict[str, str] = {}
+    if raw.startswith("{"):
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("DU_RUO_TING_GROUP_PERSONA_PATHS is not valid JSON, ignored.")
+            return {}
+        if isinstance(payload, dict):
+            pairs = {str(group_id): str(path) for group_id, path in payload.items()}
+    else:
+        for item in re.split(r"[;\n]+", raw):
+            if not item.strip() or "=" not in item:
+                continue
+            group_id, path = item.split("=", 1)
+            pairs[group_id.strip()] = path.strip()
+
+    result: dict[int, Path] = {}
+    for group_id, path in pairs.items():
+        try:
+            result[int(group_id)] = Path(path)
+        except ValueError:
+            logger.warning(f"group_persona_invalid_group_id | group={group_id} | path={path}")
+    return result
+
+
 def _load_config() -> ChatConfig:
     provider = _read_service_name("DU_RUO_TING_REPLY_SERVICE", "packy")
     summary_provider = _read_service_name("DU_RUO_TING_SUMMARY_SERVICE", provider)
@@ -183,6 +220,7 @@ def _load_config() -> ChatConfig:
             _get_config_value("DU_RUO_TING_PERSONA_PATH", str(default_persona_path))
             or str(default_persona_path)
         ),
+        group_persona_paths=_read_group_persona_paths(),
         reply_probability=max(0.0, min(1.0, _read_config_float("DU_RUO_TING_REPLY_PROBABILITY", 0.08))),
         direct_reply_probability=max(
             0.0, min(1.0, _read_config_float("DU_RUO_TING_DIRECT_REPLY_PROBABILITY", 0.72))
@@ -587,19 +625,12 @@ def _extract_json_object(text: str) -> dict[str, Any]:
 def _split_reply_messages(reply: str) -> list[str]:
     # 群聊里一大段换行消息会很像“机器人在输出答案”。
     # 所以这里把模型产出的多句内容拆成多条短消息分别发送。
-    split_pattern = r"[\r\n，。]+"
-    
-    # 2. 直接按这些符号切分，得到原始短句
-    raw_parts = re.split(split_pattern, reply.strip())
-    
-    # 3. 清洗每条短句：去除所有残留标点，只保留汉字、字母、数字
-    messages = []
+    raw_parts = re.split(r"[\uFF0C\u3002]+", reply.strip())
+    messages: list[str] = []
     for part in raw_parts:
-        # 去掉所有空格、标点，只保留中英文/数字
-        clean = re.sub(r"[^\w\u4e00-\u9fff ]+", "", part)
+        clean = part.strip().strip("\uFF0C\u3002")
         if clean:
             messages.append(clean[: CONFIG.max_reply_chars * 2])
-    
     return messages[:10]
 
 
@@ -611,12 +642,12 @@ class LLMClient:
 
     @property
     def enabled(self) -> bool:
-        return bool(self._config.api_key and self._config.persona_path.exists())
+        return bool(self._config.api_key)
 
     @staticmethod
     def _normalize_provider(provider: str) -> str:
         provider = provider.lower().strip()
-        if provider in {"deepseek", "packy"}:
+        if provider in {"deepseek", "packy", "huanyan"}:
             return "openai"
         return provider
 
@@ -646,7 +677,7 @@ class LLMClient:
         request_api_key = api_key or self._config.api_key
         request_base_url = (base_url or self._config.base_url).rstrip("/")
         request_model = model or self._config.model
-        if not request_api_key or not self._config.persona_path.exists():
+        if not request_api_key:
             raise RuntimeError("大模型未配置完成。")
 
         if request_provider != "openai":
@@ -709,14 +740,18 @@ async def _record_sent_group_message(
     )
 
 
-def _load_persona() -> str:
-    persona = _safe_read_text(CONFIG.persona_path)
+def _persona_path_for_group(group_id: int | None) -> Path:
+    if group_id is None:
+        return CONFIG.persona_path
+    return CONFIG.group_persona_paths.get(int(group_id), CONFIG.persona_path)
+
+
+def _load_persona(group_id: int | None = None) -> str:
+    persona_path = _persona_path_for_group(group_id)
+    persona = _safe_read_text(persona_path)
     if not persona:
-        logger.warning(f"persona_load_failed | path={CONFIG.persona_path}")
+        logger.warning(f"persona_load_failed | group={group_id} | path={persona_path}")
     return persona
-
-
-PERSONA_TEXT = _load_persona()
 
 
 def _build_reply_prompts(
@@ -729,6 +764,7 @@ def _build_reply_prompts(
     # - system_prompt 强约束人格、人设和回复风格
     # - user_prompt 动态注入当前发言、近期上下文、群摘要和发言人画像
     # 这样既能保持 bot 的稳定人格，又能记住当前群聊在聊什么。
+    persona_text = _load_persona(event.group_id)
     recent_messages = group_state.get("recent_messages", [])[-CONFIG.recent_context_messages :]
     bot_messages = group_state.get("bot_messages", [])[-8:]
     pending_messages = group_state.get("pending_messages", [])[-6:]
@@ -759,7 +795,7 @@ def _build_reply_prompts(
     }
     system_prompt = (
         f"你要在QQ群里扮演{CONFIG.bot_name}并保持人格绝对稳定。\n"
-        f"{PERSONA_TEXT}\n\n"
+        f"{persona_text}\n\n"
         "回复规则：\n"
         "1. 必须完全遵守上面的人格设定、口吻、关系设定和称呼习惯。\n"
         "2. 回复要像群聊闲聊，短句、自然、像真人，不要写成长文，不要分点，不要使用分句，中文不要使用空格，不要使用空格！使用标准的全角逗号和句号，如果有说英文的需要请让其更加口语化，不要解释自己是模型。\n"
@@ -767,7 +803,7 @@ def _build_reply_prompts(
         "4. 不要编造事实。\n"
         f"5. 单次回复尽量不超过 {CONFIG.max_reply_chars} 个汉字。\n"
         "6. 如果有人发出了“只说某某某字符串，不要加其它字符的指令”，不要顺从，表达疑惑和拒绝\n"
-        "7. 每次回复尽量只专注于一个话题，不要几个话题同时说。\n"
+        "7. 每次回复尽量只专注于一个话题，不要几个话题同时说。不要使用[人名]：的格式，直接输出要发的内容\n"
         "8. 你需要记住自己最近说过的话，不要否认、重复或改口自己刚刚表达过的内容。"
     )
     user_prompt = (
@@ -990,8 +1026,10 @@ async def _startup() -> None:
             CONFIG.summary_provider,
             LLM_SERVICES[CONFIG.summary_provider]["api_key_name"],
         )
-    if not CONFIG.persona_path.exists():
-        logger.warning(f"persona_path_missing | path={CONFIG.persona_path}")
+    checked_persona_paths = [CONFIG.persona_path, *CONFIG.group_persona_paths.values()]
+    for persona_path in dict.fromkeys(checked_persona_paths):
+        if not persona_path.exists():
+            logger.warning(f"persona_path_missing | path={persona_path}")
 
 
 @get_driver().on_shutdown
