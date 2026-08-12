@@ -35,6 +35,7 @@ BOT_LOG_DIR = DATA_ROOT / "bot_logs"
 PENDING_SUMMARY_MIN_MESSAGES = 12
 MAX_PENDING_MESSAGES = 80
 DEFAULT_SUMMARY_MAX_MESSAGES = 24
+DEFAULT_SUMMARY_FAILURE_COOLDOWN_SECONDS = 300
 MAX_RECENT_USER_MESSAGES = 24
 MAX_RECENT_BOT_MESSAGES = 24
 DEFAULT_BOT_NAME = "杜若汀"
@@ -62,6 +63,7 @@ SKIP_PREFIXES = (
 JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？!?~])\s*")
 _io_lock = Lock()
+_summary_locks: dict[int, asyncio.Lock] = {}
 
 
 LLM_SERVICES: dict[str, dict[str, str]] = {
@@ -94,9 +96,17 @@ class ChatConfig:
     api_key: str
     base_url: str
     model: str
+    reply_fallback_provider: str
+    reply_fallback_api_key: str
+    reply_fallback_base_url: str
+    reply_fallback_model: str
     summary_provider: str
     summary_api_key: str
     summary_base_url: str
+    summary_fallback_provider: str
+    summary_fallback_api_key: str
+    summary_fallback_base_url: str
+    summary_fallback_model: str
     bot_name: str
     persona_path: Path
     group_persona_paths: dict[int, Path]
@@ -109,7 +119,17 @@ class ChatConfig:
     request_timeout_seconds: int
     summary_model: str
     summary_max_messages: int
+    summary_failure_cooldown_seconds: int
     name_triggers: tuple[str, ...]
+
+
+class LLMResponseError(RuntimeError):
+    def __init__(self, message: str, *, detail: dict[str, Any]):
+        super().__init__(message)
+        self.detail = detail
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({self.args[0]!r}, detail={self.detail!r})"
 
 
 def _read_service_name(name: str, default: str) -> str:
@@ -193,15 +213,31 @@ def _read_group_persona_paths() -> dict[int, Path]:
 def _load_config() -> ChatConfig:
     provider = _read_service_name("DU_RUO_TING_REPLY_SERVICE", "packy")
     summary_provider = _read_service_name("DU_RUO_TING_SUMMARY_SERVICE", provider)
+    reply_fallback_provider = _read_service_name("DU_RUO_TING_REPLY_FALLBACK_SERVICE", provider)
+    summary_fallback_provider = _read_service_name("DU_RUO_TING_SUMMARY_FALLBACK_SERVICE", summary_provider)
     reply_service = LLM_SERVICES[provider]
     summary_service = LLM_SERVICES[summary_provider]
+    reply_fallback_service = LLM_SERVICES[reply_fallback_provider]
+    summary_fallback_service = LLM_SERVICES[summary_fallback_provider]
 
     api_key = _get_config_value(reply_service["api_key_name"])
     summary_api_key = _get_config_value(summary_service["api_key_name"])
+    reply_fallback_api_key = _get_config_value(reply_fallback_service["api_key_name"])
+    summary_fallback_api_key = _get_config_value(summary_fallback_service["api_key_name"])
     base_url = reply_service["base_url"]
     summary_base_url = summary_service["base_url"]
+    reply_fallback_base_url = reply_fallback_service["base_url"]
+    summary_fallback_base_url = summary_fallback_service["base_url"]
     model = _get_config_value("DU_RUO_TING_REPLY_MODEL", reply_service["default_reply_model"])
     summary_model = _get_config_value("DU_RUO_TING_SUMMARY_MODEL", summary_service["default_summary_model"])
+    reply_fallback_model = _get_config_value(
+        "DU_RUO_TING_REPLY_FALLBACK_MODEL",
+        reply_fallback_service["default_reply_model"],
+    )
+    summary_fallback_model = _get_config_value(
+        "DU_RUO_TING_SUMMARY_FALLBACK_MODEL",
+        summary_fallback_service["default_summary_model"],
+    )
     bot_name = _get_config_value("DU_RUO_TING_BOT_NAME", DEFAULT_BOT_NAME) or DEFAULT_BOT_NAME
     default_persona_path = DEFAULT_PERSONA_DIR / f"{bot_name}.txt"
     extra_triggers_raw = _get_config_value("DU_RUO_TING_NAME_TRIGGERS", ",".join(DEFAULT_EXTRA_NAME_TRIGGERS))
@@ -212,9 +248,17 @@ def _load_config() -> ChatConfig:
         api_key=api_key,
         base_url=base_url,
         model=model,
+        reply_fallback_provider=reply_fallback_provider,
+        reply_fallback_api_key=reply_fallback_api_key,
+        reply_fallback_base_url=reply_fallback_base_url,
+        reply_fallback_model=reply_fallback_model,
         summary_provider=summary_provider,
         summary_api_key=summary_api_key,
         summary_base_url=summary_base_url,
+        summary_fallback_provider=summary_fallback_provider,
+        summary_fallback_api_key=summary_fallback_api_key,
+        summary_fallback_base_url=summary_fallback_base_url,
+        summary_fallback_model=summary_fallback_model,
         bot_name=bot_name,
         persona_path=Path(
             _get_config_value("DU_RUO_TING_PERSONA_PATH", str(default_persona_path))
@@ -234,6 +278,13 @@ def _load_config() -> ChatConfig:
         summary_max_messages=max(
             8,
             _read_config_int("DU_RUO_TING_SUMMARY_MAX_MESSAGES", DEFAULT_SUMMARY_MAX_MESSAGES),
+        ),
+        summary_failure_cooldown_seconds=max(
+            60,
+            _read_config_int(
+                "DU_RUO_TING_SUMMARY_FAILURE_COOLDOWN_SECONDS",
+                DEFAULT_SUMMARY_FAILURE_COOLDOWN_SECONDS,
+            ),
         ),
         name_triggers=(bot_name, *extra_triggers),
     )
@@ -304,6 +355,8 @@ def _default_group_state(group_id: int) -> dict[str, Any]:
         "bot_messages": [],
         "summaries": [],
         "last_summary_at": None,
+        "last_summary_failed_at": None,
+        "last_summary_error": None,
         "last_bot_reply_at": None,
         "last_reply_message_id": None,
         "bot_reply_count": 0,
@@ -567,10 +620,19 @@ def _parse_time(value: str | None) -> datetime | None:
         return None
 
 
+def _summary_failure_cooling_down(group_state: dict[str, Any]) -> bool:
+    failed_at = _parse_time(group_state.get("last_summary_failed_at"))
+    if failed_at is None:
+        return False
+    return datetime.now() - failed_at < timedelta(seconds=CONFIG.summary_failure_cooldown_seconds)
+
+
 def _should_summarize(group_state: dict[str, Any]) -> bool:
     # 摘要不是每条消息都跑：
     # 只有待整理消息达到阈值，并且距离上次整理已过一段时间后才触发。
     # 这样能显著减少 token 消耗和接口压力。
+    if _summary_failure_cooling_down(group_state):
+        return False
     pending = group_state.get("pending_messages", [])
     if len(pending) < PENDING_SUMMARY_MIN_MESSAGES:
         return False
@@ -580,6 +642,28 @@ def _should_summarize(group_state: dict[str, Any]) -> bool:
     if last_summary_at is None:
         return True
     return datetime.now() - last_summary_at >= timedelta(minutes=CONFIG.summary_interval_minutes)
+
+
+def _summary_lock_for_group(group_id: int) -> asyncio.Lock:
+    lock = _summary_locks.get(group_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _summary_locks[group_id] = lock
+    return lock
+
+
+def _llm_error_detail(exc: Exception) -> dict[str, Any]:
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, dict):
+        return detail
+    return {}
+
+
+def _format_llm_error_detail(exc: Exception) -> str:
+    detail = _llm_error_detail(exc)
+    if not detail:
+        return ""
+    return " | detail=" + json.dumps(detail, ensure_ascii=False, default=str)
 
 def _is_at_bot(event: GroupMessageEvent) -> bool:
     # OneBot V11 适配器会把开头/结尾的 @机器人 从 event.message 里移除，
@@ -631,7 +715,7 @@ def _split_reply_messages(reply: str) -> list[str]:
         clean = part.strip().strip("\uFF0C\u3002")
         if clean:
             messages.append(clean[: CONFIG.max_reply_chars * 2])
-    return messages[:10]
+    return messages[:15]
 
 
 class LLMClient:
@@ -658,6 +742,51 @@ class LLMClient:
             return base_url
         return f"{base_url}/chat/completions"
 
+    @staticmethod
+    def _response_preview(response: httpx.Response) -> str:
+        text = response.text.replace("\r", "\\r").replace("\n", "\\n")
+        return text[:500]
+
+    def _response_detail(
+        self,
+        response: httpx.Response,
+        *,
+        provider: str,
+        model: str,
+        base_url: str,
+    ) -> dict[str, Any]:
+        return {
+            "provider": provider,
+            "model": model,
+            "base_url": base_url,
+            "url": str(response.request.url),
+            "status_code": response.status_code,
+            "reason_phrase": response.reason_phrase,
+            "content_type": response.headers.get("content-type"),
+            "content_length_header": response.headers.get("content-length"),
+            "body_len": len(response.content),
+            "body_preview": self._response_preview(response),
+        }
+
+    @staticmethod
+    def _request_detail(
+        *,
+        provider: str,
+        model: str,
+        base_url: str,
+        url: str,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> dict[str, Any]:
+        return {
+            "provider": provider,
+            "model": model,
+            "base_url": base_url,
+            "url": url,
+            "system_prompt_len": len(system_prompt),
+            "user_prompt_len": len(user_prompt),
+        }
+
     async def close(self) -> None:
         await self._client.aclose()
 
@@ -683,8 +812,9 @@ class LLMClient:
         if request_provider != "openai":
             raise RuntimeError(f"不支持的大模型服务: {provider or self._config.provider}")
 
+        url = self._openai_chat_url(request_base_url)
         response = await self._client.post(
-            self._openai_chat_url(request_base_url),
+            url,
             headers={
                 "Authorization": f"Bearer {request_api_key}",
                 "Content-Type": "application/json",
@@ -698,12 +828,143 @@ class LLMClient:
                 ],
             },
         )
-        response.raise_for_status()
-        payload = response.json()
-        return payload["choices"][0]["message"]["content"].strip()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = self._response_detail(
+                response,
+                provider=provider or self._config.provider,
+                model=request_model,
+                base_url=request_base_url,
+            )
+            raise LLMResponseError("LLM HTTP 状态码异常", detail=detail) from exc
+
+        try:
+            payload = response.json()
+        except json.JSONDecodeError as exc:
+            detail = self._response_detail(
+                response,
+                provider=provider or self._config.provider,
+                model=request_model,
+                base_url=request_base_url,
+            )
+            raise LLMResponseError("LLM 响应不是合法 JSON", detail=detail) from exc
+
+        try:
+            content = payload["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            detail = self._request_detail(
+                provider=provider or self._config.provider,
+                model=request_model,
+                base_url=request_base_url,
+                url=url,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+            if isinstance(payload, dict):
+                detail["payload_keys"] = list(payload)[:20]
+                detail["payload_preview"] = json.dumps(payload, ensure_ascii=False)[:800]
+            else:
+                detail["payload_type"] = type(payload).__name__
+            raise LLMResponseError("LLM 响应缺少 choices[0].message.content", detail=detail) from exc
+
+        if content is None or not str(content).strip():
+            detail = self._request_detail(
+                provider=provider or self._config.provider,
+                model=request_model,
+                base_url=request_base_url,
+                url=url,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+            if isinstance(payload, dict):
+                choice = (payload.get("choices") or [{}])[0]
+                detail["finish_reason"] = choice.get("finish_reason") if isinstance(choice, dict) else None
+                detail["payload_preview"] = json.dumps(payload, ensure_ascii=False)[:800]
+            raise LLMResponseError("LLM 响应 content 为空", detail=detail)
+
+        return str(content).strip()
 
 
 CLIENT = LLMClient(CONFIG)
+
+
+def _llm_attempts(
+    *,
+    primary_provider: str,
+    primary_model: str,
+    primary_api_key: str,
+    primary_base_url: str,
+    fallback_provider: str,
+    fallback_model: str,
+    fallback_api_key: str,
+    fallback_base_url: str,
+) -> list[dict[str, str]]:
+    attempts: list[dict[str, str]] = []
+    primary = {
+        "label": "primary",
+        "provider": primary_provider,
+        "model": primary_model,
+        "api_key": primary_api_key,
+        "base_url": primary_base_url,
+    }
+    if primary["api_key"]:
+        attempts.append(primary)
+    fallback = {
+        "label": "fallback",
+        "provider": fallback_provider,
+        "model": fallback_model,
+        "api_key": fallback_api_key,
+        "base_url": fallback_base_url,
+    }
+    same_service = (
+        bool(attempts)
+        and fallback["provider"] == attempts[0]["provider"]
+        and fallback["model"] == attempts[0]["model"]
+        and fallback["base_url"].rstrip("/") == attempts[0]["base_url"].rstrip("/")
+        and fallback["api_key"] == attempts[0]["api_key"]
+    )
+    if fallback["api_key"] and not same_service:
+        attempts.append(fallback)
+    return attempts
+
+
+def _reply_attempts() -> list[dict[str, str]]:
+    return _llm_attempts(
+        primary_provider=CONFIG.provider,
+        primary_model=CONFIG.model,
+        primary_api_key=CONFIG.api_key,
+        primary_base_url=CONFIG.base_url,
+        fallback_provider=CONFIG.reply_fallback_provider,
+        fallback_model=CONFIG.reply_fallback_model,
+        fallback_api_key=CONFIG.reply_fallback_api_key,
+        fallback_base_url=CONFIG.reply_fallback_base_url,
+    )
+
+
+def _summary_attempts() -> list[dict[str, str]]:
+    return _llm_attempts(
+        primary_provider=CONFIG.summary_provider,
+        primary_model=CONFIG.summary_model,
+        primary_api_key=CONFIG.summary_api_key,
+        primary_base_url=CONFIG.summary_base_url,
+        fallback_provider=CONFIG.summary_fallback_provider,
+        fallback_model=CONFIG.summary_fallback_model,
+        fallback_api_key=CONFIG.summary_fallback_api_key,
+        fallback_base_url=CONFIG.summary_fallback_base_url,
+    )
+
+
+def _mark_summary_failed(group_id: int, exc: Exception) -> None:
+    with _io_lock:
+        group_state = _read_json(_group_path(group_id), _default_group_state(group_id))
+        group_state["last_summary_failed_at"] = _now_str()
+        group_state["last_summary_error"] = {
+            "error_type": type(exc).__name__,
+            "error": repr(exc),
+            "detail": _llm_error_detail(exc),
+        }
+        _write_json(_group_path(group_id), group_state)
 
 
 @Bot.on_called_api
@@ -876,77 +1137,132 @@ async def _maybe_update_summary(group_id: int) -> None:
     # 4. 把摘要写回群状态，并把 user_updates 合并进各用户画像
     if not is_feature_enabled(group_id, PLUGIN_NAME):
         return
-    with _io_lock:
-        group_state = _read_json(_group_path(group_id), _default_group_state(group_id))
-        if not _should_summarize(group_state):
+    lock = _summary_lock_for_group(group_id)
+    if lock.locked():
+        logger.debug("summary_skipped | reason=already_running | group={}", group_id)
+        return
+
+    async with lock:
+        with _io_lock:
+            group_state = _read_json(_group_path(group_id), _default_group_state(group_id))
+            if not _should_summarize(group_state):
+                return
+            all_messages = list(group_state.get("pending_messages", []))
+
+        pending_count = len(all_messages)
+        messages = all_messages[-CONFIG.summary_max_messages :]
+        summary_input_count = len(messages)
+        summarized_start = max(0, pending_count - summary_input_count)
+        last_summary_at = group_state.get("last_summary_at")
+        last_summary_failed_at = group_state.get("last_summary_failed_at")
+        attempts = _summary_attempts()
+        if not messages or not attempts:
             return
-        messages = list(group_state.get("pending_messages", []))
 
-    pending_count = len(messages)
-    messages = messages[-CONFIG.summary_max_messages :]
-    summary_input_count = len(messages)
-    last_summary_at = group_state.get("last_summary_at")
-    if not messages or not CLIENT.enabled:
-        return
-
-    try:
-        content = await CLIENT.chat(
-            *_build_summary_prompts(group_id, messages),
-            temperature=0.3,
-            model=CONFIG.summary_model,
-            provider=CONFIG.summary_provider,
-            api_key=CONFIG.summary_api_key,
-            base_url=CONFIG.summary_base_url,
-        )
-        summary_data = _extract_json_object(content)
-    except Exception as exc:
-        logger.warning(
-            f"summary_failed | group={group_id} | pending_total={pending_count} | "
-            f"summary_input={summary_input_count} | last_summary_at={last_summary_at} | "
-            f"provider={CONFIG.summary_provider} | model={CONFIG.summary_model} | "
-            f"base_url={CONFIG.summary_base_url} | "
-            f"timeout={CONFIG.request_timeout_seconds}s | error_type={type(exc).__name__} | error={exc!r}"
-        )
-        return
-
-    created_at = _now_str()
-    summary_record = {
-        "created_at": created_at,
-        "summary": str(summary_data.get("summary", "")).strip(),
-        "key_points": list(summary_data.get("key_points", []))[:8],
-    }
-
-    with _io_lock:
-        group_state = _read_json(_group_path(group_id), _default_group_state(group_id))
-        current_pending = group_state.get("pending_messages", [])
-        # 这里重新读取一遍群状态，是为了尽量减少与并发消息写入的冲突。
-        # 如果摘要期间又进了新消息，只移除本次实际整理过的那一段。
-        if len(current_pending) < len(messages):
-            messages = current_pending
-        group_state["pending_messages"] = current_pending[len(messages) :]
-        _append_limited(group_state.setdefault("summaries", []), summary_record, 20)
-        group_state["last_summary_at"] = created_at
-        _write_json(_group_path(group_id), group_state)
-
-        for update in summary_data.get("user_updates", []):
+        prompts = _build_summary_prompts(group_id, messages)
+        summary_data: dict[str, Any] | None = None
+        last_exc: Exception | None = None
+        used_attempt: dict[str, str] | None = None
+        for attempt in attempts:
             try:
-                user_id = int(update["user_id"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            user_state = _read_json(_user_path(user_id), _default_user_state(user_id, str(user_id), group_id))
-            profile_summary = str(update.get("profile_summary", "")).strip()
-            speaking_style = str(update.get("speaking_style", "")).strip()
-            interests = [str(item).strip() for item in update.get("interests", []) if str(item).strip()]
-            facts = [str(item).strip() for item in update.get("important_facts", []) if str(item).strip()]
-            # The summary prompt asks the model to output the final merged profile.
-            # Replace the old portrait instead of appending to it, otherwise small
-            # paraphrases quickly accumulate into noisy duplicates.
-            user_state["profile_summary"] = profile_summary[:180]
-            user_state["speaking_style"] = speaking_style[:120]
-            user_state["interests"] = _merge_unique_texts([], interests, limit=10)
-            user_state["important_facts"] = _merge_unique_texts([], facts, limit=10)
-            _write_json(_user_path(user_id), user_state)
-            _write_user_doc(user_state)
+                content = await CLIENT.chat(
+                    *prompts,
+                    temperature=0.3,
+                    model=attempt["model"],
+                    provider=attempt["provider"],
+                    api_key=attempt["api_key"],
+                    base_url=attempt["base_url"],
+                )
+                summary_data = _extract_json_object(content)
+                if not isinstance(summary_data, dict):
+                    raise LLMResponseError(
+                        "摘要 JSON 顶层不是对象",
+                        detail={
+                            "provider": attempt["provider"],
+                            "model": attempt["model"],
+                            "base_url": attempt["base_url"],
+                            "json_type": type(summary_data).__name__,
+                        },
+                    )
+                used_attempt = attempt
+                break
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    f"summary_attempt_failed | group={group_id} | attempt={attempt['label']} | "
+                    f"pending_total={pending_count} | summary_input={summary_input_count} | "
+                    f"last_summary_at={last_summary_at} | last_summary_failed_at={last_summary_failed_at} | "
+                    f"provider={attempt['provider']} | model={attempt['model']} | base_url={attempt['base_url']} | "
+                    f"timeout={CONFIG.request_timeout_seconds}s | error_type={type(exc).__name__} | error={exc!r}"
+                    f"{_format_llm_error_detail(exc)}"
+                )
+
+        if summary_data is None:
+            exc = last_exc or RuntimeError("摘要模型没有返回可用结果。")
+            _mark_summary_failed(group_id, exc)
+            logger.warning(
+                f"summary_failed | group={group_id} | attempts={len(attempts)} | "
+                f"pending_total={pending_count} | summary_input={summary_input_count} | "
+                f"cooldown={CONFIG.summary_failure_cooldown_seconds}s | "
+                f"error_type={type(exc).__name__} | error={exc!r}{_format_llm_error_detail(exc)}"
+            )
+            return
+
+        created_at = _now_str()
+        summary_record = {
+            "created_at": created_at,
+            "summary": str(summary_data.get("summary", "")).strip(),
+            "key_points": list(summary_data.get("key_points", []))[:8],
+            "provider": used_attempt["provider"] if used_attempt else CONFIG.summary_provider,
+            "model": used_attempt["model"] if used_attempt else CONFIG.summary_model,
+        }
+
+        with _io_lock:
+            group_state = _read_json(_group_path(group_id), _default_group_state(group_id))
+            current_pending = group_state.get("pending_messages", [])
+            # 重新读取一遍群状态，以保留摘要期间新进入的消息。
+            # 本次整理的是启动时 pending 队列尾部的一段，所以只移除那一段。
+            if len(current_pending) < pending_count:
+                summarized_start = max(0, len(current_pending) - summary_input_count)
+            group_state["pending_messages"] = (
+                current_pending[:summarized_start]
+                + current_pending[summarized_start + summary_input_count :]
+            )
+            _append_limited(group_state.setdefault("summaries", []), summary_record, 20)
+            group_state["last_summary_at"] = created_at
+            group_state["last_summary_failed_at"] = None
+            group_state["last_summary_error"] = None
+            _write_json(_group_path(group_id), group_state)
+
+            for update in summary_data.get("user_updates", []):
+                try:
+                    user_id = int(update["user_id"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                user_state = _read_json(_user_path(user_id), _default_user_state(user_id, str(user_id), group_id))
+                profile_summary = str(update.get("profile_summary", "")).strip()
+                speaking_style = str(update.get("speaking_style", "")).strip()
+                interests = [str(item).strip() for item in update.get("interests", []) if str(item).strip()]
+                facts = [str(item).strip() for item in update.get("important_facts", []) if str(item).strip()]
+                # The summary prompt asks the model to output the final merged profile.
+                # Replace the old portrait instead of appending to it, otherwise small
+                # paraphrases quickly accumulate into noisy duplicates.
+                user_state["profile_summary"] = profile_summary[:180]
+                user_state["speaking_style"] = speaking_style[:120]
+                user_state["interests"] = _merge_unique_texts([], interests, limit=10)
+                user_state["important_facts"] = _merge_unique_texts([], facts, limit=10)
+                _write_json(_user_path(user_id), user_state)
+                _write_user_doc(user_state)
+
+        logger.info(
+            "summary_updated | group={} | pending_before={} | summarized={} | provider={} | model={} | remaining={}",
+            group_id,
+            pending_count,
+            summary_input_count,
+            summary_record["provider"],
+            summary_record["model"],
+            max(0, pending_count - summary_input_count),
+        )
 
 
 async def _generate_reply(
@@ -957,18 +1273,52 @@ async def _generate_reply(
 ) -> str:
     # 实时回复只做“生成文本”这件事，不负责拆句发送和写回状态。
     # 这样失败时更容易定位：是生成失败，还是发送/记忆更新失败。
-    if not CLIENT.enabled:
+    attempts = _reply_attempts()
+    if not attempts:
         return ""
-    try:
-        content = await CLIENT.chat(*_build_reply_prompts(event, text, group_state, user_state), temperature=0.95)
-    except Exception as exc:
+    prompts = _build_reply_prompts(event, text, group_state, user_state)
+    content = ""
+    last_exc: Exception | None = None
+    for attempt in attempts:
+        try:
+            content = await CLIENT.chat(
+                *prompts,
+                temperature=0.95,
+                model=attempt["model"],
+                provider=attempt["provider"],
+                api_key=attempt["api_key"],
+                base_url=attempt["base_url"],
+            )
+            if attempt["label"] != "primary":
+                logger.info(
+                    "reply_fallback_succeeded | group={} | user={} | provider={} | model={} | base_url={}",
+                    event.group_id,
+                    event.user_id,
+                    attempt["provider"],
+                    attempt["model"],
+                    attempt["base_url"],
+                )
+            break
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                f"reply_attempt_failed | group={event.group_id} | user={event.user_id} | "
+                f"attempt={attempt['label']} | text_len={len(text)} | is_tome={event.is_tome()} | "
+                f"at_bot={_is_at_bot(event)} | provider={attempt['provider']} | model={attempt['model']} | "
+                f"base_url={attempt['base_url']} | timeout={CONFIG.request_timeout_seconds}s | "
+                f"error_type={type(exc).__name__} | error={exc!r}{_format_llm_error_detail(exc)}"
+            )
+
+    if not content:
+        exc = last_exc or RuntimeError("回复模型没有返回可用结果。")
         logger.warning(
             f"reply_failed | group={event.group_id} | user={event.user_id} | text_len={len(text)} | "
-            f"is_tome={event.is_tome()} | at_bot={_is_at_bot(event)} | provider={CONFIG.provider} | model={CONFIG.model} | "
-            f"base_url={CONFIG.base_url} | "
-            f"timeout={CONFIG.request_timeout_seconds}s | error_type={type(exc).__name__} | error={exc!r}"
+            f"is_tome={event.is_tome()} | at_bot={_is_at_bot(event)} | attempts={len(attempts)} | "
+            f"timeout={CONFIG.request_timeout_seconds}s | error_type={type(exc).__name__} | "
+            f"error={exc!r}{_format_llm_error_detail(exc)}"
         )
         return ""
+
     reply = content.strip().strip('"').strip()
     if reply in {"", "空字符串", "null", "None"}:
         return ""
@@ -988,7 +1338,7 @@ def _mark_bot_replied(group_id: int, reply_to_message_id: int) -> None:
 @scheduler.scheduled_job("interval", minutes=10, id="duruoting_group_memory")
 async def _scheduled_summary_job() -> None:
     # 定时兜底任务：即使群里后续发言变少，也能把积压的 pending 消息整理进长期记忆。
-    if not CLIENT.enabled:
+    if not _summary_attempts():
         return
     _ensure_dirs()
     for file in GROUP_DIR.glob("*.json"):
@@ -1006,13 +1356,24 @@ async def _startup() -> None:
     _ensure_dirs()
     _compact_existing_user_profiles()
     logger.info(
-        "duruoting_llm_config | provider={} | model={} | base_url={} | summary_provider={} | summary_model={} | summary_base_url={}",
+        "duruoting_llm_config | provider={} | model={} | base_url={} | "
+        "reply_fallback_provider={} | reply_fallback_model={} | reply_fallback_base_url={} | "
+        "summary_provider={} | summary_model={} | summary_base_url={} | "
+        "summary_fallback_provider={} | summary_fallback_model={} | summary_fallback_base_url={} | "
+        "summary_failure_cooldown={}s",
         CONFIG.provider,
         CONFIG.model,
         CONFIG.base_url,
+        CONFIG.reply_fallback_provider,
+        CONFIG.reply_fallback_model,
+        CONFIG.reply_fallback_base_url,
         CONFIG.summary_provider,
         CONFIG.summary_model,
         CONFIG.summary_base_url,
+        CONFIG.summary_fallback_provider,
+        CONFIG.summary_fallback_model,
+        CONFIG.summary_fallback_base_url,
+        CONFIG.summary_failure_cooldown_seconds,
     )
     if not CONFIG.api_key:
         logger.warning(
@@ -1025,6 +1386,18 @@ async def _startup() -> None:
             "未配置摘要服务 API key | service={} | key_name={}",
             CONFIG.summary_provider,
             LLM_SERVICES[CONFIG.summary_provider]["api_key_name"],
+        )
+    if CONFIG.reply_fallback_provider != CONFIG.provider and not CONFIG.reply_fallback_api_key:
+        logger.warning(
+            "未配置回复备用服务 API key | service={} | key_name={}",
+            CONFIG.reply_fallback_provider,
+            LLM_SERVICES[CONFIG.reply_fallback_provider]["api_key_name"],
+        )
+    if CONFIG.summary_fallback_provider != CONFIG.summary_provider and not CONFIG.summary_fallback_api_key:
+        logger.warning(
+            "未配置摘要备用服务 API key | service={} | key_name={}",
+            CONFIG.summary_fallback_provider,
+            LLM_SERVICES[CONFIG.summary_fallback_provider]["api_key_name"],
         )
     checked_persona_paths = [CONFIG.persona_path, *CONFIG.group_persona_paths.values()]
     for persona_path in dict.fromkeys(checked_persona_paths):
