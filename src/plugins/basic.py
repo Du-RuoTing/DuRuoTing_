@@ -22,7 +22,7 @@ WELCOME = "欢迎"
 FEATURE = "功能"
 FEATURE_ON = "开启功能"
 FEATURE_OFF = "关闭功能"
-UNKNOWN_FEATURE = "未知功能，只能操作：帮助、签到、欢迎、roll、闲聊、头衔、favor、今天吃什么、小汀报考"
+UNKNOWN_FEATURE = "未知功能，只能操作：帮助、签到、欢迎、roll、闲聊、头衔、favor、今天吃什么、小汀报考、棋局"
 CHAT_FEATURE = "闲聊"
 FAVOR_FEATURE = "favor"
 WHATEAT_FEATURE = "今天吃什么"
@@ -157,6 +157,7 @@ def _build_help_image(group_id: int, features: dict[str, bool]) -> bytes:
         ("吃什么 / 喝什么 / 添加菜单 / 查看菜单", "随机菜单相关功能"),
         ("abbr bupt", "查询高校英文简称对应的中文校名"),
         ("报考 物理 4874 河南 新工科优先 [.num=48]", "小汀报考：按位次/地区生成报考参考"),
+        ("棋局帮助 / 国际象棋人机 / 象棋对战", "图片棋盘：国际象棋、象棋，人机或玩家对战"),
         ("原神帮助 / 绑定uid100000001", "原神角色练度、面板和游戏数据查询"),
         (f"@{_bot_name()}", "在已开启闲聊的群里聊天"),
         ("设置头衔 <内容> / 清除头衔", "群头衔工具"),

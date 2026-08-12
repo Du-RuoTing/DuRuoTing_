@@ -21,6 +21,7 @@ DEFAULT_FEATURES = {
     "favor": True,
     "今天吃什么": True,
     "小汀报考": True,
+    "棋局": True,
 }
 LEGACY_FEATURE_NAMES = {
     "帮助": ("甯姪",),
