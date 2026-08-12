@@ -11,6 +11,7 @@ device.json
 # Runtime state and generated data
 cache/
 data/
+gsuid_core/
 config/
 db/
 music/
