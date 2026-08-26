@@ -10,6 +10,7 @@ from typing import Any
 DATA_DIR = Path("data")
 SETTINGS_PATH = DATA_DIR / "group_settings.json"
 SIGN_PATH = DATA_DIR / "sign_in.json"
+ADMINS_KEY = "__admins"
 DEFAULT_CHAT_ENABLED_GROUPS = {1084401296}
 DEFAULT_FEATURES = {
     "帮助": True,
@@ -22,6 +23,7 @@ DEFAULT_FEATURES = {
     "今天吃什么": True,
     "小汀报考": True,
     "棋局": True,
+    "链接解析": True,
 }
 LEGACY_FEATURE_NAMES = {
     "帮助": ("甯姪",),
@@ -78,16 +80,36 @@ def _normalize_group_features(group_id: int, current: dict[str, Any]) -> dict[st
     return normalized
 
 
+def _normalize_group_admins(current: dict[str, Any]) -> list[int]:
+    raw_admins = current.get(ADMINS_KEY, [])
+    if not isinstance(raw_admins, list):
+        return []
+    admins: list[int] = []
+    seen: set[int] = set()
+    for raw in raw_admins:
+        try:
+            user_id = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if user_id in seen:
+            continue
+        seen.add(user_id)
+        admins.append(user_id)
+    return admins
+
+
 def get_group_features(group_id: int) -> dict[str, bool]:
     with _lock:
         data = _read_json(SETTINGS_PATH, {})
         current = data.get(str(group_id), {})
         if not isinstance(current, dict):
             current = {}
-        current = _normalize_group_features(group_id, current)
+        features = _normalize_group_features(group_id, current)
+        current.update(features)
+        current[ADMINS_KEY] = _normalize_group_admins(current)
         data[str(group_id)] = current
         _write_json(SETTINGS_PATH, data)
-        return dict(current)
+        return dict(features)
 
 
 def set_group_feature(group_id: int, feature: str, enabled: bool) -> bool:
@@ -98,13 +120,74 @@ def set_group_feature(group_id: int, feature: str, enabled: bool) -> bool:
         current = data.get(str(group_id), {})
         if not isinstance(current, dict):
             current = {}
-        current = _normalize_group_features(group_id, current)
+        features = _normalize_group_features(group_id, current)
+        current.update(features)
+        current[ADMINS_KEY] = _normalize_group_admins(current)
         current[feature] = enabled
         for legacy_name in LEGACY_FEATURE_NAMES.get(feature, ()):
             current.pop(legacy_name, None)
         data[str(group_id)] = current
         _write_json(SETTINGS_PATH, data)
     return True
+
+
+def get_group_admins(group_id: int) -> list[int]:
+    with _lock:
+        data = _read_json(SETTINGS_PATH, {})
+        current = data.get(str(group_id), {})
+        if not isinstance(current, dict):
+            current = {}
+        current.update(_normalize_group_features(group_id, current))
+        current[ADMINS_KEY] = _normalize_group_admins(current)
+        data[str(group_id)] = current
+        _write_json(SETTINGS_PATH, data)
+        return list(current[ADMINS_KEY])
+
+
+def add_group_admin(group_id: int, user_id: int) -> bool:
+    with _lock:
+        data = _read_json(SETTINGS_PATH, {})
+        current = data.get(str(group_id), {})
+        if not isinstance(current, dict):
+            current = {}
+        current.update(_normalize_group_features(group_id, current))
+        admins = _normalize_group_admins(current)
+        if int(user_id) in admins:
+            current[ADMINS_KEY] = admins
+            data[str(group_id)] = current
+            _write_json(SETTINGS_PATH, data)
+            return False
+        admins.append(int(user_id))
+        current[ADMINS_KEY] = admins
+        data[str(group_id)] = current
+        _write_json(SETTINGS_PATH, data)
+        return True
+
+
+def remove_group_admin(group_id: int, user_id: int) -> bool:
+    with _lock:
+        data = _read_json(SETTINGS_PATH, {})
+        current = data.get(str(group_id), {})
+        if not isinstance(current, dict):
+            current = {}
+        current.update(_normalize_group_features(group_id, current))
+        admins = _normalize_group_admins(current)
+        user_id = int(user_id)
+        if user_id not in admins:
+            current[ADMINS_KEY] = admins
+            data[str(group_id)] = current
+            _write_json(SETTINGS_PATH, data)
+            return False
+        current[ADMINS_KEY] = [admin for admin in admins if admin != user_id]
+        data[str(group_id)] = current
+        _write_json(SETTINGS_PATH, data)
+        return True
+
+
+def is_group_admin(group_id: int | None, user_id: int | None) -> bool:
+    if group_id is None or user_id is None:
+        return False
+    return int(user_id) in get_group_admins(int(group_id))
 
 
 def is_feature_enabled(group_id: int | None, feature: str) -> bool:
