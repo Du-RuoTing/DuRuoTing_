@@ -16,6 +16,10 @@ config/
 db/
 music/
 
+# Local TTS service source, models, and generated audio
+services/cosyvoice/
+voices/
+
 # LLOneBot local runtime bundle and data
 llonebot/
 linshi/
