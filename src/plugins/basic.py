@@ -277,6 +277,7 @@ def _build_help_image(group_id: int, features: dict[str, bool]) -> bytes:
         ("roll <min> <max>", "掷一个指定范围的骰子"),
         ("开启功能 / 关闭功能 <功能名>", "superuser admin 管理群功能"),
         ("开启闲聊 [群号] / 关闭闲聊 [群号]", "superuser admin 选择哪些群开启闲聊"),
+        ("tts global/here voice/text", "superuser 切换全局或当前会话的闲聊回复形式"),
         ("admin add/remove/list", "superuser 设置每个群的 admin"),
         ("早安 / 晚安 / 睡眠统计", "记录和查看睡眠"),
         ("吃什么 / 喝什么 / 添加菜单 / 查看菜单", "随机菜单相关功能"),

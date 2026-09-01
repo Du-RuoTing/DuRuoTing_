@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import random
 import re
+import time
+import wave
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -12,10 +15,11 @@ from threading import Lock
 from typing import Any
 
 import httpx
-from nonebot import get_driver, logger, on_message, require
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, PrivateMessageEvent
+from nonebot import get_driver, logger, on_message, on_regex, require
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageSegment, PrivateMessageEvent
 from nonebot.adapters.onebot.v11.permission import GROUP, PRIVATE
 from nonebot.matcher import Matcher
+from nonebot.permission import SUPERUSER
 
 from .state import is_feature_enabled
 
@@ -33,6 +37,7 @@ GROUP_DIR = DATA_ROOT / "groups"
 PRIVATE_DIR = DATA_ROOT / "private"
 USER_DIR = DATA_ROOT / "users"
 BOT_LOG_DIR = DATA_ROOT / "bot_logs"
+TTS_SETTINGS_PATH = DATA_ROOT / "tts_settings.json"
 PENDING_SUMMARY_MIN_MESSAGES = 12
 MAX_PENDING_MESSAGES = 80
 DEFAULT_SUMMARY_MAX_MESSAGES = 24
@@ -123,6 +128,12 @@ class ChatConfig:
     summary_max_messages: int
     summary_failure_cooldown_seconds: int
     name_triggers: tuple[str, ...]
+    tts_enabled: bool
+    tts_base_url: str
+    tts_reference_wav: Path
+    tts_prompt_text_path: Path
+    tts_timeout_seconds: int
+    tts_text_fallback: bool
 
 
 class LLMResponseError(RuntimeError):
@@ -180,6 +191,19 @@ def _read_config_int(name: str, default: int) -> int:
     except ValueError:
         logger.warning("{} 不是合法整数，回退为 {}", name, default)
         return default
+
+
+def _read_config_bool(name: str, default: bool) -> bool:
+    value = _get_config_value(name)
+    if not value:
+        return default
+    normalized = value.lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    logger.warning("{} 不是合法布尔值，回退为 {}", name, default)
+    return default
 
 
 def _read_group_persona_paths() -> dict[int, Path]:
@@ -293,12 +317,32 @@ def _load_config() -> ChatConfig:
             ),
         ),
         name_triggers=(bot_name, *extra_triggers),
+        tts_enabled=_read_config_bool("DU_RUO_TING_TTS_ENABLED", True),
+        tts_base_url=_get_config_value("DU_RUO_TING_TTS_BASE_URL", "http://127.0.0.1:50000").rstrip("/"),
+        tts_reference_wav=Path(
+            _get_config_value(
+                "DU_RUO_TING_TTS_REFERENCE_WAV",
+                str(Path("voices") / "duruoting" / "reference.wav"),
+            )
+        ),
+        tts_prompt_text_path=Path(
+            _get_config_value(
+                "DU_RUO_TING_TTS_PROMPT_TEXT_PATH",
+                str(Path("voices") / "duruoting" / "prompt.txt"),
+            )
+        ),
+        tts_timeout_seconds=max(15, _read_config_int("DU_RUO_TING_TTS_TIMEOUT_SECONDS", 120)),
+        tts_text_fallback=_read_config_bool("DU_RUO_TING_TTS_TEXT_FALLBACK", True),
     )
 
 
 CONFIG = _load_config()
 chat_matcher = on_message(permission=GROUP, priority=250, block=False)
 private_chat_matcher = on_message(permission=PRIVATE, priority=250, block=False)
+global_voice_cmd = on_regex(r"(?i)^tts\s+global\s+voice$", permission=SUPERUSER, priority=4, block=True)
+global_text_cmd = on_regex(r"(?i)^tts\s+global\s+text$", permission=SUPERUSER, priority=4, block=True)
+session_voice_cmd = on_regex(r"(?i)^tts\s+here\s+voice$", permission=SUPERUSER, priority=4, block=True)
+session_text_cmd = on_regex(r"(?i)^tts\s+here\s+text$", permission=SUPERUSER, priority=4, block=True)
 
 
 def _ensure_dirs() -> None:
@@ -322,6 +366,60 @@ def _read_json(path: Path, default: Any) -> Any:
 def _write_json(path: Path, value: Any) -> None:
     _ensure_dirs()
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _default_tts_settings() -> dict[str, Any]:
+    return {
+        "global_mode": "voice" if CONFIG.tts_enabled else "text",
+        "conversations": {},
+    }
+
+
+def _read_tts_settings() -> dict[str, Any]:
+    settings = _read_json(TTS_SETTINGS_PATH, _default_tts_settings())
+    if not isinstance(settings, dict):
+        return _default_tts_settings()
+    global_mode = settings.get("global_mode")
+    if global_mode not in {"voice", "text"}:
+        global_mode = "voice" if CONFIG.tts_enabled else "text"
+    raw_conversations = settings.get("conversations", {})
+    conversations = (
+        {str(key): value for key, value in raw_conversations.items() if value in {"voice", "text"}}
+        if isinstance(raw_conversations, dict)
+        else {}
+    )
+    return {"global_mode": global_mode, "conversations": conversations}
+
+
+def _conversation_key(scope: str, target_id: int) -> str:
+    return f"{scope}:{int(target_id)}"
+
+
+def _set_global_tts_mode(mode: str) -> None:
+    with _io_lock:
+        _write_json(TTS_SETTINGS_PATH, {"global_mode": mode, "conversations": {}})
+
+
+def _set_conversation_tts_mode(scope: str, target_id: int, mode: str) -> None:
+    with _io_lock:
+        settings = _read_tts_settings()
+        settings["conversations"][_conversation_key(scope, target_id)] = mode
+        _write_json(TTS_SETTINGS_PATH, settings)
+
+
+def _tts_mode_for(scope: str, target_id: int) -> str:
+    with _io_lock:
+        settings = _read_tts_settings()
+    return settings["conversations"].get(
+        _conversation_key(scope, target_id),
+        settings["global_mode"],
+    )
+
+
+def _event_conversation(event: GroupMessageEvent | PrivateMessageEvent) -> tuple[str, int, str]:
+    if isinstance(event, GroupMessageEvent):
+        return "group", int(event.group_id), f"群 {event.group_id}"
+    return "private", int(event.user_id), f"私聊 {event.user_id}"
 
 
 def _group_path(group_id: int) -> Path:
@@ -789,16 +887,86 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     return json.loads(stripped)
 
 
+class TTSClient:
+    def __init__(self, config: ChatConfig):
+        self._config = config
+        self._client = httpx.AsyncClient(timeout=config.tts_timeout_seconds)
+        self._lock = asyncio.Lock()
+
+    @property
+    def enabled(self) -> bool:
+        return self._config.tts_enabled
+
+    @staticmethod
+    def _pcm_to_wav(pcm: bytes) -> bytes:
+        output = io.BytesIO()
+        with wave.open(output, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(24000)
+            wav_file.writeframes(pcm)
+        return output.getvalue()
+
+    async def synthesize(self, text: str) -> bytes:
+        text = text.strip()
+        if not text:
+            raise ValueError("TTS text is empty")
+
+        async with self._lock:
+            started_at = time.perf_counter()
+            reference_wav = await asyncio.to_thread(self._config.tts_reference_wav.read_bytes)
+            prompt_text = (
+                await asyncio.to_thread(
+                    self._config.tts_prompt_text_path.read_text,
+                    encoding="utf-8-sig",
+                )
+            ).strip()
+            if not prompt_text:
+                raise ValueError(f"TTS prompt text is empty: {self._config.tts_prompt_text_path}")
+
+            response = await self._client.post(
+                f"{self._config.tts_base_url}/inference_zero_shot",
+                data={"tts_text": text, "prompt_text": prompt_text},
+                files={"prompt_wav": (self._config.tts_reference_wav.name, reference_wav, "audio/wav")},
+            )
+            response.raise_for_status()
+            pcm = response.content
+            if not pcm:
+                raise RuntimeError("CosyVoice returned empty audio")
+
+            wav_audio = self._pcm_to_wav(pcm)
+            logger.info(
+                "duruoting_tts_success | text_len={} | pcm_bytes={} | wav_bytes={} | elapsed={:.2f}s",
+                len(text),
+                len(pcm),
+                len(wav_audio),
+                time.perf_counter() - started_at,
+            )
+            return wav_audio
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+
 def _split_reply_messages(reply: str) -> list[str]:
-    # 群聊里一大段换行消息会很像“机器人在输出答案”。
-    # 所以这里把模型产出的多句内容拆成多条短消息分别发送。
-    raw_parts = re.split(r"[\uFF0C\u3002]+", reply.strip())
+    raw_parts = re.split(r"[，。]+", reply.strip())
     messages: list[str] = []
     for part in raw_parts:
-        clean = part.strip().strip("\uFF0C\u3002")
+        clean = part.strip().strip("，。")
         if clean:
             messages.append(clean[: CONFIG.max_reply_chars * 2])
     return messages[:15]
+
+
+async def _send_text_reply(matcher: Matcher, reply: str) -> bool:
+    messages = _split_reply_messages(reply)
+    if not messages:
+        return False
+    for index, message in enumerate(messages):
+        await matcher.send(message)
+        if index < len(messages) - 1:
+            await asyncio.sleep(5)
+    return True
 
 
 class LLMClient:
@@ -970,6 +1138,47 @@ class LLMClient:
 
 
 CLIENT = LLMClient(CONFIG)
+TTS_CLIENT = TTSClient(CONFIG)
+
+
+async def _send_reply(matcher: Matcher, reply: str, *, scope: str, target_id: int) -> bool:
+    tts_mode = _tts_mode_for(scope, target_id)
+    if not TTS_CLIENT.enabled or tts_mode == "text":
+        logger.info(
+            "duruoting_reply_mode | scope={} | target={} | mode=text | tts_available={}",
+            scope,
+            target_id,
+            TTS_CLIENT.enabled,
+        )
+        return await _send_text_reply(matcher, reply)
+
+    try:
+        wav_audio = await TTS_CLIENT.synthesize(reply)
+        await matcher.send(MessageSegment.record(wav_audio))
+        return True
+    except Exception as exc:
+        status_code = None
+        response_text = ""
+        if isinstance(exc, httpx.HTTPStatusError):
+            status_code = exc.response.status_code
+            response_text = exc.response.text[:500]
+        logger.exception(
+            "duruoting_tts_failed | scope={} | target={} | base_url={} | "
+            "reference_wav={} | prompt_text_path={} | text_len={} | "
+            "error_type={} | status_code={} | response={!r}",
+            scope,
+            target_id,
+            CONFIG.tts_base_url,
+            CONFIG.tts_reference_wav,
+            CONFIG.tts_prompt_text_path,
+            len(reply),
+            type(exc).__name__,
+            status_code,
+            response_text,
+        )
+        if CONFIG.tts_text_fallback:
+            return await _send_text_reply(matcher, reply)
+        return False
 
 
 def _llm_attempts(
@@ -1556,6 +1765,17 @@ async def _startup() -> None:
         CONFIG.summary_fallback_base_url,
         CONFIG.summary_failure_cooldown_seconds,
     )
+    logger.info(
+        "duruoting_tts_config | enabled={} | base_url={} | reference_wav={} | "
+        "prompt_text_path={} | timeout={}s | text_fallback={} | global_mode={}",
+        CONFIG.tts_enabled,
+        CONFIG.tts_base_url,
+        CONFIG.tts_reference_wav,
+        CONFIG.tts_prompt_text_path,
+        CONFIG.tts_timeout_seconds,
+        CONFIG.tts_text_fallback,
+        _read_tts_settings()["global_mode"],
+    )
     if not CONFIG.api_key:
         logger.warning(
             "未配置回复服务 API key | service={} | key_name={}",
@@ -1584,11 +1804,46 @@ async def _startup() -> None:
     for persona_path in dict.fromkeys(checked_persona_paths):
         if not persona_path.exists():
             logger.warning(f"persona_path_missing | path={persona_path}")
+    if CONFIG.tts_enabled:
+        if not CONFIG.tts_reference_wav.is_file():
+            logger.warning(f"tts_reference_wav_missing | path={CONFIG.tts_reference_wav}")
+        if not CONFIG.tts_prompt_text_path.is_file():
+            logger.warning(f"tts_prompt_text_missing | path={CONFIG.tts_prompt_text_path}")
 
 
 @get_driver().on_shutdown
 async def _shutdown() -> None:
-    await CLIENT.close()
+    await asyncio.gather(CLIENT.close(), TTS_CLIENT.close())
+
+
+@global_voice_cmd.handle()
+async def handle_global_voice() -> None:
+    if not TTS_CLIENT.enabled:
+        await global_voice_cmd.finish("TTS 服务总开关未启用，无法切换到语音模式。")
+    _set_global_tts_mode("voice")
+    await global_voice_cmd.finish("已切换为全局语音，原有的单会话设置已清除。")
+
+
+@global_text_cmd.handle()
+async def handle_global_text() -> None:
+    _set_global_tts_mode("text")
+    await global_text_cmd.finish("已切换为全局文字，原有的单会话设置已清除。")
+
+
+@session_voice_cmd.handle()
+async def handle_session_voice(event: GroupMessageEvent | PrivateMessageEvent) -> None:
+    if not TTS_CLIENT.enabled:
+        await session_voice_cmd.finish("TTS 服务总开关未启用，无法切换到语音模式。")
+    scope, target_id, label = _event_conversation(event)
+    _set_conversation_tts_mode(scope, target_id, "voice")
+    await session_voice_cmd.finish(f"已将{label}单独切换为语音。")
+
+
+@session_text_cmd.handle()
+async def handle_session_text(event: GroupMessageEvent | PrivateMessageEvent) -> None:
+    scope, target_id, label = _event_conversation(event)
+    _set_conversation_tts_mode(scope, target_id, "text")
+    await session_text_cmd.finish(f"已将{label}单独切换为文字。")
 
 
 @chat_matcher.handle()
@@ -1599,7 +1854,7 @@ async def handle_group_chat(event: GroupMessageEvent, matcher: Matcher) -> None:
     # 2. 记录消息
     # 3. 必要时异步触发摘要
     # 4. 按策略决定要不要回
-    # 5. 生成回复并拆成多条短句发送
+    # 5. 生成回复并合成为一条语音发送
     if not is_feature_enabled(event.group_id, PLUGIN_NAME):
         return
     if str(event.user_id) == str(event.self_id):
@@ -1643,14 +1898,8 @@ async def handle_group_chat(event: GroupMessageEvent, matcher: Matcher) -> None:
     if not reply:
         return
 
-    messages = _split_reply_messages(reply)
-    if not messages:
-        return
-
-    for index, item in enumerate(messages, start=1):
-        await matcher.send(item)
-        _record_bot_reply(event.group_id, event.message_id, item, index, len(messages))
-        await asyncio.sleep(5)
+    if await _send_reply(matcher, reply, scope="group", target_id=event.group_id):
+        _record_bot_reply(event.group_id, event.message_id, reply)
 
 
 @private_chat_matcher.handle()
@@ -1674,12 +1923,6 @@ async def handle_private_chat(event: PrivateMessageEvent, matcher: Matcher) -> N
     if not reply:
         return
 
-    messages = _split_reply_messages(reply)
-    if not messages:
-        return
-
     user_name = _extract_private_name(event)
-    for index, item in enumerate(messages, start=1):
-        await matcher.send(item)
-        _record_private_bot_reply(event.user_id, user_name, event.message_id, item, index, len(messages))
-        await asyncio.sleep(5)
+    if await _send_reply(matcher, reply, scope="private", target_id=event.user_id):
+        _record_private_bot_reply(event.user_id, user_name, event.message_id, reply)
